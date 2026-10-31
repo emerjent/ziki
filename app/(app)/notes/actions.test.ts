@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ user: vi.fn(), tenant: vi.fn(), actor: vi.fn(), save: vi.fn(), restore: vi.fn(), revalidate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ user: vi.fn(), tenant: vi.fn(), actor: vi.fn(), save: vi.fn(), restore: vi.fn(), addComment: vi.fn(), revalidate: vi.fn() }));
 vi.mock("@/lib/auth-helpers", () => ({ requireUser: mocks.user }));
 vi.mock("@/lib/tenant-context", () => ({ currentTenantIdFor: mocks.tenant }));
-vi.mock("@/lib/project-notes", () => ({ humanNotesActor: mocks.actor, saveProjectNotes: mocks.save, restoreProjectNotes: mocks.restore }));
+vi.mock("@/lib/project-notes", () => ({ humanNotesActor: mocks.actor, saveProjectNotes: mocks.save, restoreProjectNotes: mocks.restore, addNoteComment: mocks.addComment }));
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidate, unstable_cache: (fn: unknown) => fn }));
-import { saveNotesAction, restoreNotesAction } from "./actions";
+import { saveNotesAction, restoreNotesAction, addNoteCommentAction } from "./actions";
 import { IssueApiError } from "@/lib/agent-api/errors";
 beforeEach(() => { vi.resetAllMocks(); mocks.user.mockResolvedValue({ id: "u" }); mocks.tenant.mockResolvedValue("t"); mocks.actor.mockResolvedValue({ projectId: "p" }); mocks.save.mockResolvedValue({ version: 2 }); mocks.restore.mockResolvedValue({ version: 3 }); });
 describe("human project-notes actions", () => {
@@ -27,5 +27,19 @@ describe("human project-notes actions", () => {
   it("restores through the same actor authorization", async () => {
     expect(await restoreNotesAction("p", "r1", { expectedVersion: 2 })).toEqual({ version: 3 });
     expect(mocks.restore).toHaveBeenCalledWith({ projectId: "p" }, "r1", { expectedVersion: 2 });
+  });
+  it("adds a human note through the current project actor and refreshes the feed", async () => {
+    mocks.addComment.mockResolvedValue({ comment: { id: "c1", body: "A discovery", authorName: "Person", agentId: null, createdAt: new Date("2026-10-31T10:00:00Z") } });
+    expect(await addNoteCommentAction("p", "A discovery")).toEqual({ comment: {
+      id: "c1", body: "A discovery", authorName: "Person", agentId: null, createdAt: "2026-10-31T10:00:00.000Z", upvotes: 0,
+    } });
+    expect(mocks.actor).toHaveBeenCalledWith({ id: "u" }, "t", "p");
+    expect(mocks.addComment).toHaveBeenCalledWith({ projectId: "p" }, { body: "A discovery" });
+    expect(mocks.revalidate).toHaveBeenCalledWith("/notes");
+  });
+  it("keeps a failed comment out of the feed", async () => {
+    mocks.addComment.mockRejectedValue(new IssueApiError(403, "Forbidden"));
+    expect(await addNoteCommentAction("p", "A discovery")).toEqual({ error: "Forbidden" });
+    expect(mocks.revalidate).not.toHaveBeenCalled();
   });
 });

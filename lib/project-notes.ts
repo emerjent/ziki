@@ -129,11 +129,9 @@ export async function listNoteComments(actor: NotesActor, params: URLSearchParam
 }
 
 export async function addNoteComment(actor: NotesActor, input: unknown) {
-  if (!actor.agent) throw new IssueApiError(403, "Comments are contributed through the agent API.");
   const data = noteCommentInput.parse(input);
-  const agentId = actor.agent.agentId;
   return prisma.$transaction(async (db) => {
-    const comment = await db.projectNoteComment.create({ data: { projectId: actor.projectId, agentId,
+    const comment = await db.projectNoteComment.create({ data: { projectId: actor.projectId, agentId: actor.agent?.agentId ?? null,
       ownerId: actor.userId, authorName: actor.name, body: data.body } });
     await notesAudit(db, actor, "notes.commented", comment.id, { projectId: actor.projectId });
     return { comment };
