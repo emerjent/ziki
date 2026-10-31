@@ -14,30 +14,36 @@ export function StageSidebar({ steps }: { steps: SidebarStep[] }) {
         {steps.map((step, index) => {
           const last = index === steps.length - 1;
           return (
-            <li key={step.label} className="flex shrink-0 gap-3">
-              <div className="flex flex-col items-center">
-                {/* The count sits in the box; the selected one is filled blue. */}
-                <span
-                  aria-hidden="true"
-                  className={`flex h-7 min-w-7 shrink-0 items-center justify-center rounded-lg px-1 font-mono text-[11px] font-semibold tabular-nums ${
-                    step.selected
-                      ? "bg-electric-blue-strong text-white ring-4 ring-electric-blue-strong/20"
-                      : "border-2 border-zk-border bg-zk-surface text-zk-muted"
-                  }`}
-                >
-                  {step.count}
-                </span>
-                {last ? null : <span aria-hidden="true" className="my-1 min-h-5 w-0.5 flex-1 rounded-full bg-zk-border max-lg:hidden" />}
-              </div>
+            <li key={step.label} className="flex shrink-0">
+              {/* The whole row, count box and name, is one link (#739). */}
               <Link
                 href={step.href}
                 aria-current={step.selected ? "page" : undefined}
-                className={`flex min-h-7 min-w-0 flex-1 items-center leading-tight max-lg:whitespace-nowrap rounded-md text-sm hover:text-zk-accent ${last ? "" : "lg:mb-5"} ${
-                  step.selected ? "font-bold text-zk-text" : "font-medium text-zk-text2"
-                }`}
+                className="group flex min-w-0 flex-1 gap-3 rounded-md"
               >
-                {step.label}
-                <span className="sr-only">, {step.count}</span>
+                <span className="flex flex-col items-center">
+                  {/* The count sits in the box; the selected one is filled blue. */}
+                  <span
+                    aria-hidden="true"
+                    data-testid="stage-count"
+                    className={`flex h-7 min-w-7 shrink-0 items-center justify-center rounded-lg px-1 font-mono text-[11px] font-semibold tabular-nums ${
+                      step.selected
+                        ? "bg-electric-blue-strong text-white ring-4 ring-electric-blue-strong/20"
+                        : "border-2 border-zk-border bg-zk-surface text-zk-muted group-hover:border-zk-accent group-hover:text-zk-accent"
+                    }`}
+                  >
+                    {step.count}
+                  </span>
+                  {last ? null : <span aria-hidden="true" className="my-1 min-h-5 w-0.5 flex-1 rounded-full bg-zk-border max-lg:hidden" />}
+                </span>
+                <span
+                  className={`flex min-h-7 min-w-0 flex-1 items-center leading-tight max-lg:whitespace-nowrap text-sm group-hover:text-zk-accent ${last ? "" : "lg:mb-5"} ${
+                    step.selected ? "font-bold text-zk-text" : "font-medium text-zk-text2"
+                  }`}
+                >
+                  {step.label}
+                  <span className="sr-only">, {step.count}</span>
+                </span>
               </Link>
             </li>
           );
