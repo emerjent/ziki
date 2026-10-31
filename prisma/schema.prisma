@@ -2040,7 +2040,7 @@ model ProjectNoteRevision {
 model ProjectNoteComment {
   id         String                   @id @default(cuid())
   projectId  String
-  agentId    String
+  agentId    String?
   ownerId    String
   authorName String
   body       String

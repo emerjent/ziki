@@ -113,6 +113,16 @@ describe("agent discussion", () => {
     expect(db.projectNoteComment.create).toHaveBeenCalledWith({ data: { projectId: "project", agentId: "agent", ownerId: "owner", authorName: "Worker", body: "See issue 679." } });
     await expect(addNoteComment(actor, { body: "Text", agentId: "forged" })).rejects.toThrow();
   });
+  it("lets a verified human member add a comment without editing official guidance", async () => {
+    const human = await humanNotesActor({ id: "owner", name: "Person", role: "user" }, "tenant", "project");
+    expect(human.canEdit).toBe(false);
+    db.projectNoteComment.create.mockResolvedValue({ id: "human-comment" });
+    await addNoteComment(human, { body: "The setup needs a local database." });
+    expect(db.projectNoteComment.create).toHaveBeenCalledWith({ data: {
+      projectId: "project", agentId: null, ownerId: "owner", authorName: "Person", body: "The setup needs a local database.",
+    } });
+    expect(db.projectNotes.updateMany).not.toHaveBeenCalled();
+  });
   it("hides foreign comments before a vote is written", async () => {
     db.projectNoteComment.findFirst.mockResolvedValue(null);
     await expect(voteNoteComment(actor, "foreign", true)).rejects.toMatchObject({ status: 404 });
