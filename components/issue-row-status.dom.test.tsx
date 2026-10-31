@@ -66,17 +66,30 @@ describe("IssueRowStatus", () => {
 });
 
 describe("ConfirmationCountBadge", () => {
-  it("shows the confirms and the rejects, neutral, while the issue is not confirmed", () => {
+  it("shows a red box when rejections lead, with a readable status label", () => {
     const { getByTestId } = render(<ConfirmationCountBadge accepts={1} rejects={2} needed={2} confirmed={false} />);
     expect(getByTestId("confirmation-accepts").textContent).toBe("1");
     expect(getByTestId("confirmation-rejects").textContent).toBe("2");
-    expect(getByTestId("confirmation-count")).toHaveAttribute("data-tone", "neutral");
+    expect(getByTestId("confirmation-count")).toHaveAttribute("data-tone", "bad");
+    expect(getByTestId("confirmation-count")).toHaveClass("bg-zk-bad-bg", "text-zk-bad-fg");
+    expect(getByTestId("confirmation-count")).toHaveAccessibleName(/more rejections than confirmations/);
   });
 
-  it("turns green once confirmed", () => {
-    const { getByTestId } = render(<ConfirmationCountBadge accepts={2} rejects={0} needed={2} confirmed />);
-    expect(getByTestId("confirmation-accepts").textContent).toBe("2");
+  it("turns green when confirmations lead, even before the threshold", () => {
+    const { getByTestId } = render(<ConfirmationCountBadge accepts={1} rejects={0} needed={3} confirmed={false} />);
     expect(getByTestId("confirmation-count")).toHaveAttribute("data-tone", "ok");
+    expect(getByTestId("confirmation-count")).toHaveClass("bg-zk-ok-bg", "text-zk-ok-fg");
+  });
+
+  it.each([[0, 0], [2, 2]])("stays neutral when the counts tie (%i and %i)", (accepts, rejects) => {
+    const { getByTestId } = render(<ConfirmationCountBadge accepts={accepts} rejects={rejects} needed={3} confirmed={false} />);
+    expect(getByTestId("confirmation-count")).toHaveAttribute("data-tone", "neutral");
+    expect(getByTestId("confirmation-count")).toHaveClass("bg-zk-surface", "text-zk-text2");
+  });
+
+  it("keeps the confirmed announcement once the threshold is reached", () => {
+    const { getByTestId } = render(<ConfirmationCountBadge accepts={3} rejects={0} needed={3} confirmed />);
+    expect(getByTestId("confirmation-count")).toHaveAccessibleName(/^Confirmed: 3 confirms/);
   });
 });
 

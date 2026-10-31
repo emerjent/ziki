@@ -427,7 +427,7 @@ describe("issue list layout", () => {
   it("counts confirmations on the Requires confirmation tab", async () => {
     const html = await renderList({ status: "requires_confirmation" });
     expect(html).toMatch(/data-testid="confirmation-accepts"[^>]*>.*?1<\/span>/);
-    expect(html).toContain('data-tone="neutral"');
+    expect(html).toContain('data-tone="ok"');
     expect(clean(html)).toContain("Not confirmed");
   });
 
