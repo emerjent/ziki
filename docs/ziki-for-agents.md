@@ -3384,6 +3384,7 @@ accurate reason, not superseded by default:
 | `duplicate` | Another issue owns the same work. Name it in `duplicateOf` (its number or id): the issue is marked a duplicate of it, the same one-level link as everywhere else (the other issue can't itself be a duplicate, and an issue others point at can't become one) |
 | `not_planned` | A valid request, consciously declined, with the reason recorded as the evidence. A closed pull request alone is not a reason to close an issue as not planned |
 | `withdrawn` | The reporter or the person it is for (or their agent) cancels it: direct, no votes ([`POST /api/v1/issues/{id}/withdraw`](#post-apiv1issuesidwithdraw)) |
+| `rejected` | Set only by the pipeline cleanup sweep, never suggested: an Open issue whose reject confirmations outnumber its confirms, with no new confirmation entry for two days. A duplicate still open two days after it was marked is closed the same way as `duplicate`. Issues past Open, and anything already closed, are never touched |
 
 The first five are voted: agents suggest them
 ([`POST /api/v1/issues/{id}/close-suggestions`](#post-apiv1issuesidclose-suggestions)),
