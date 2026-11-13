@@ -318,6 +318,8 @@ model User {
   dispatchedClaims          IssueClaim[]            @relation("ClaimDispatcher")
   issueBids                 IssueBid[]              @relation("IssueBidBeneficiary")
   deliveries                Delivery[]              @relation("DeliveryBeneficiary")
+  deliveriesImplemented     Delivery[]              @relation("DeliveryImplementer")
+  deliveriesVerified        Delivery[]              @relation("DeliveryManagerVerifier")
   plansOwned                Plan[]                  @relation("PlanOwner")
   confirmations             IssueConfirmation[]
   testVerdicts              TestVerdict[]
@@ -691,6 +693,10 @@ model Attachment {
   /// Evidence on a confirmation entry (#confirmation-evidence).
   confirmationId     String?
   redesignProposalId String?
+  /// The delivery this file was submitted with (#marketing-output-box).
+  deliveryId         String?
+  /// The delivery sequence round this attachment belongs to (#marketing-output-box).
+  deliverySequence   Int?
   filename           String
   contentType        String
   size               Int
@@ -704,6 +710,7 @@ model Attachment {
   comment            Comment?           @relation(fields: [commentId], references: [id], onDelete: Cascade)
   confirmation       IssueConfirmation? @relation(fields: [confirmationId], references: [id], onDelete: Cascade)
   redesignProposal   RedesignProposal?  @relation(fields: [redesignProposalId], references: [id], onDelete: Cascade)
+  delivery           Delivery?          @relation(fields: [deliveryId], references: [id], onDelete: SetNull)
   /// Evidence filed with a private security finding (#security-findings): readable only by who may see the finding.
   securityFindingId  String?
   securityFinding    SecurityFinding?   @relation(fields: [securityFindingId], references: [id], onDelete: Cascade)
@@ -714,6 +721,7 @@ model Attachment {
   @@index([confirmationId])
   @@index([securityFindingId])
   @@index([redesignProposalId])
+  @@index([deliveryId, deliverySequence])
   @@index([uploaderId, createdAt])
 }
 
@@ -1537,41 +1545,67 @@ model IssueBid {
 /// issue to Delivered, where independent agents judge it (test verdicts). One
 /// per agent per issue: delivering again replaces it. People reply to it.
 model Delivery {
-  id                String    @id @default(cuid())
-  bugId             String
-  agentId           String
+  id                    String    @id @default(cuid())
+  bugId                 String
+  agentId               String
   /// The person the agent works for: the claim's beneficiary.
-  beneficiaryUserId String
+  beneficiaryUserId     String
   /// At most two sentences: what was done.
-  summary           String
+  summary               String
   /// What changed, how it was checked, and anything left open.
-  description       String
+  description           String
   /// The pull request delivered. Null on marketing work, which has none.
-  pullRequestUrl    String?
+  pullRequestUrl        String?
   /// Links to the finished work, on marketing work.
-  deliverableUrls   String[]  @default([])
+  deliverableUrls       String[]  @default([])
+  /// Candidate published URLs submitted for external verification (#marketing-engine).
+  publishedUrls         String[]  @default([])
   /// The finished work itself as Markdown, on marketing work. Shown as a file.
-  deliverableText   String?
+  deliverableText       String?
   /// The pull request's head commit when it was delivered, when GitHub said.
-  headSha           String?
+  headSha               String?
   /// Links to screenshots of the fix.
-  screenshots       String[]  @default([])
+  screenshots           String[]  @default([])
   /// Test output or a verification summary.
-  testResults       String?
+  testResults           String?
   /// The delivery receipt (#delivery-receipt, lib/delivery-receipt.ts): what the
   /// deliverer verified and how, what it did not verify and why, and what the
   /// reviewer should test. Null when the delivery carried none.
-  receipt           Json?
-  createdAt         DateTime  @default(now())
+  receipt               Json?
+  /// Submission sequence on this bug and agent (#marketing-output-box): increments
+  /// on each delivery submission to isolate attachments to their exact revision round.
+  currentSequence       Int       @default(1)
+  /// Deliverable status: ready_to_use | publication_pending | live_published | implemented (#marketing-engine).
+  deliveryStatus        String    @default("ready_to_use")
+  /// Previous status before being marked implemented, used to restore state upon reversal.
+  previousStatus        String?
+  /// When a team member marked this delivery as implemented.
+  implementedAt         DateTime?
+  /// Who marked this delivery as implemented.
+  implementedById       String?
+  /// When a manager confirmed this delivery as live on the public web.
+  verifiedPublishedAt   DateTime?
+  /// Which manager confirmed the live publication.
+  verifiedByManagerId   String?
+  /// Structured verification evidence per URL and manual override records.
+  verificationEvidence  Json?
+  /// Explanation required when a manager manually confirms publication without a successful probe.
+  manualOverrideReason  String?
+  createdAt             DateTime  @default(now())
   /// When it was last delivered. Delivering again replaces it.
-  updatedAt         DateTime  @updatedAt
-  bug               Bug       @relation(fields: [bugId], references: [id], onDelete: Cascade)
-  agent             Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  beneficiary       User      @relation("DeliveryBeneficiary", fields: [beneficiaryUserId], references: [id], onDelete: Cascade)
-  replies           Comment[]
+  updatedAt             DateTime  @updatedAt
+  bug                   Bug       @relation(fields: [bugId], references: [id], onDelete: Cascade)
+  agent                 Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  beneficiary           User      @relation("DeliveryBeneficiary", fields: [beneficiaryUserId], references: [id], onDelete: Cascade)
+  implementedBy         User?     @relation("DeliveryImplementer", fields: [implementedById], references: [id], onDelete: SetNull)
+  verifiedByManager     User?     @relation("DeliveryManagerVerifier", fields: [verifiedByManagerId], references: [id], onDelete: SetNull)
+  replies               Comment[]
+  attachments           Attachment[]
 
   @@unique([bugId, agentId])
   @@index([bugId, createdAt])
+  @@index([deliveryStatus])
+  @@index([verifiedPublishedAt])
 }
 
 /// A plan (#plan-review): the Plan review step's entry on a complex issue, one

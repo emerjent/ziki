@@ -3,64 +3,128 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { refreshLibrary } from "@/app/(app)/[org]/[project]/marketing/output-box/actions";
+import {
+  refreshLibrary,
+  toggleDeliveryImplementedAction,
+  retryUrlVerificationAction,
+} from "@/app/(app)/[org]/[project]/marketing/output-box/actions";
 import { marketingPath, projectPath, type ProjectRef } from "@/lib/project-paths";
 import { formatBytes } from "@/lib/attachments";
 import { formatDate } from "@/lib/format";
-import { CONTENT_TYPES, filterLibrary, type ContentType, type LibraryFile, type LibraryItem, type LibraryResult } from "./model";
+import {
+  CONTENT_TYPES,
+  MARKETING_CATEGORIES,
+  filterLibrary,
+  type ContentType,
+  type MarketingCategory,
+  type LibraryFile,
+  type LibraryItem,
+  type LibraryResult,
+} from "./model";
 import { DeliveredWork } from "@/components/marketing/delivered-work";
 import { LibraryHeading } from "./heading";
 import "./library.css";
 
 function publishedDate(date: string | null) {
-  return date ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "Africa/Lagos" }).format(new Date(date)) : "Date unavailable";
+  return date
+    ? new Intl.DateTimeFormat("en-GB", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        timeZone: "Africa/Lagos",
+      }).format(new Date(date))
+    : "Date unavailable";
 }
 
 function FileMark({ file }: { file?: LibraryFile }) {
-  const label = !file ? "FILE" : ({ Graphics: "IMG", Videos: "PLAY", Articles: "READ", PDFs: "PDF", Docs: "DOC", Links: "LINK" })[file.kind];
-  return <span className="lb-file-mark" data-kind={file?.kind} aria-hidden="true"><strong>{label}</strong><span>{file?.name ?? "Deliverable"}</span></span>;
+  const label = !file
+    ? "FILE"
+    : ({ Graphics: "IMG", Videos: "PLAY", Articles: "READ", PDFs: "PDF", Docs: "DOC", Links: "LINK" })[file.kind];
+  return (
+    <span className="lb-file-mark" data-kind={file?.kind} aria-hidden="true">
+      <strong>{label}</strong>
+      <span>{file?.name ?? "Deliverable"}</span>
+    </span>
+  );
 }
 
 function FileThumbnail({ file }: { file?: LibraryFile }) {
   const [failed, setFailed] = useState(false);
   if (file?.kind !== "Graphics" || failed) return <FileMark file={file} />;
-  return <span className="lb-thumbnail" aria-hidden="true">
-    {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary approved image sources, with a fallback */}
-    <img src={file.url} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
-  </span>;
+  return (
+    <span className="lb-thumbnail" aria-hidden="true">
+      {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary approved image sources, with a fallback */}
+      <img src={file.url} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
+    </span>
+  );
 }
 
-export function Library({ slug, projectName, initial }: { slug: ProjectRef; projectName: string; initial: LibraryResult }) {
+function statusLabel(status: LibraryItem["deliveryStatus"]): string {
+  switch (status) {
+    case "live_published":
+      return "✓ Live · Published";
+    case "implemented":
+      return "✓ Implemented";
+    case "publication_pending":
+      return "⏳ Verification Pending";
+    case "ready_to_use":
+    default:
+      return "Ready to Use";
+  }
+}
+
+export function Library({
+  slug,
+  projectName,
+  initial,
+}: {
+  slug: ProjectRef;
+  projectName: string;
+  initial: LibraryResult;
+}) {
   const params = useSearchParams();
   const [result, setResult] = useState(initial);
   const [refreshError, setRefreshError] = useState(false);
   const [pending, setPending] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const request = useRef(false);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const heading = useRef<HTMLHeadingElement>(null);
   const errorHeading = useRef<HTMLHeadingElement>(null);
   const scrollBeforeDetail = useRef(0);
+
   const search = params.get("q") ?? "";
-  // The field keeps its own text: URL state arrives in a transition, and reading it back here dropped typed characters.
   const [query, setQuery] = useState(search);
+
   const rawType = params.get("type");
   const type: ContentType = CONTENT_TYPES.find((value) => value === rawType) ?? "All";
+
+  const rawCategory = params.get("category");
+  const category: MarketingCategory = MARKETING_CATEGORIES.find((value) => value === rawCategory) ?? "All";
+
   const oldest = params.get("sort") === "oldest";
   const items = result.ok ? result.items : [];
-  const filtered = filterLibrary(items, query, type, oldest);
+  const filtered = filterLibrary(items, query, type, category, oldest);
+
   const selected = filtered.find((item) => item.id === params.get("item")) ?? filtered[0];
-  const selectedFile = selected?.files.find((file) => file.id === params.get("file"))
-    ?? selected?.files.find((file) => type === "All" || file.kind === type) ?? selected?.files[0];
+  const selectedFile =
+    selected?.files.find((file) => file.id === params.get("file")) ??
+    selected?.files.find((file) => type === "All" || file.kind === type) ??
+    selected?.files[0];
   const detail = params.get("view") === "detail" && Boolean(selected);
   const previousDetail = useRef(detail);
 
   function update(values: Record<string, string | null>, push = false) {
     const next = new URLSearchParams(window.location.search);
     for (const [key, value] of Object.entries(values)) {
-      if (value) next.set(key, value); else next.delete(key);
+      if (value) next.set(key, value);
+      else next.delete(key);
     }
     const url = `${window.location.pathname}${next.size ? `?${next}` : ""}`;
-    if (push) window.history.pushState(null, "", url); else window.history.replaceState(null, "", url);
+    if (push) window.history.pushState(null, "", url);
+    else window.history.replaceState(null, "", url);
   }
 
   function select(item: LibraryItem) {
@@ -99,60 +163,426 @@ export function Library({ slug, projectName, initial }: { slug: ProjectRef; proj
     setPending(true);
     try {
       const next = await refreshLibrary(slug);
-      if (next.ok) { setResult(next); setRefreshError(false); }
-      else if (result.ok) setRefreshError(true);
-      else setResult(next);
+      if (next.ok) {
+        setResult(next);
+        setRefreshError(false);
+      } else if (result.ok) {
+        setRefreshError(true);
+      } else {
+        setResult(next);
+      }
     } catch {
-      if (result.ok) setRefreshError(true); else setResult({ ok: false });
-    } finally { request.current = false; setPending(false); }
+      if (result.ok) setRefreshError(true);
+      else setResult({ ok: false });
+    } finally {
+      request.current = false;
+      setPending(false);
+    }
+  }
+
+  async function handleToggleImplemented(item: LibraryItem) {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError(null);
+    try {
+      const willImplement = item.deliveryStatus !== "implemented";
+      const res = await toggleDeliveryImplementedAction(slug, item.deliveryId, willImplement);
+      if (res.ok) {
+        setResult((prev) => {
+          if (!prev.ok) return prev;
+          return {
+            ...prev,
+            items: prev.items.map((i) =>
+              i.id === item.id
+                ? {
+                    ...i,
+                    deliveryStatus: res.deliveryStatus,
+                    implementedAt: res.implementedAt,
+                    implementedByName: res.implementedByName,
+                  }
+                : i,
+            ),
+          };
+        });
+      } else {
+        setActionError(res.error);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to update implementation status.");
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function handleRetryVerification(item: LibraryItem) {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError(null);
+    try {
+      const res = await retryUrlVerificationAction(slug, item.deliveryId);
+      if (res.ok) {
+        setResult((prev) => {
+          if (!prev.ok) return prev;
+          return {
+            ...prev,
+            items: prev.items.map((i) =>
+              i.id === item.id ? { ...i, verificationEvidence: res.evidence } : i,
+            ),
+          };
+        });
+      } else {
+        setActionError(res.error ?? "Failed to re-verify URLs.");
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to re-verify URLs.");
+    } finally {
+      setActionPending(false);
+    }
   }
 
   const tasksPath = marketingPath(slug);
-  return <div className="lb-page" data-detail={detail}>
-    <LibraryHeading slug={slug} projectName={projectName} />
-    {!result.ok ? <section className="lb-state" aria-busy={pending}>
-      <span className="lb-state-icon lb-warning" aria-hidden="true">!</span>
-      <h2 ref={errorHeading} tabIndex={-1} role="alert">We couldn’t load the Output box</h2><p>Check your connection and try again in a moment.</p>
-      <button className="lb-button lb-primary" onClick={refresh} disabled={pending}>{pending ? "Trying again…" : "Try again"}</button>
-    </section> : items.length === 0 ? <section className="lb-state">
-      <span className="lb-state-icon" aria-hidden="true">◇</span><h2>No approved work yet</h2>
-      <p>Deliverables will appear here when a marketing task reaches Live · Published.</p>
-      <Link className="lb-button lb-primary" href={tasksPath}>View Marketing</Link>
-    </section> : <>
-      {refreshError && <div className="lb-refresh-error" role="alert">We couldn’t refresh the Library. Your previous results are still shown. <button className="lb-button" onClick={refresh} disabled={pending}>Try again</button></div>}
-      <div className="lb-toolbar" aria-label="Find approved work">
-        <label className="lb-search"><span className="sr-only">Search approved work</span><span aria-hidden="true">⌕</span><input type="search" placeholder="Search approved work…" value={query} onChange={(event) => { setQuery(event.target.value); update({ q: event.target.value || null, view: null }); }} /></label>
-        <div className="lb-filters" role="group" aria-label="Deliverable type">{CONTENT_TYPES.map((value) => <button key={value} className="lb-filter" aria-pressed={type === value} onClick={() => update({ type: value === "All" ? null : value, file: null, view: null })}>{value}</button>)}</div>
-        <label className="lb-sort"><span className="sr-only">Sort by publication date</span><select value={oldest ? "oldest" : "newest"} onChange={(event) => update({ sort: event.target.value === "oldest" ? "oldest" : null })}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
-        <button className="lb-button lb-refresh" onClick={refresh} disabled={pending}>{pending ? "Refreshing…" : "Refresh"}</button>
-      </div>
-      <p className="lb-count" role="status">{pending ? "Refreshing approved work…" : `${filtered.length} ${filtered.length === 1 ? "deliverable" : "deliverables"} · ${filtered.reduce((count, item) => count + item.files.length, 0)} files & links`}</p>
-      {filtered.length === 0 ? <section className="lb-state lb-no-matches"><h2>No matching work</h2><p>Try another search or clear the content filter.</p><button className="lb-button" onClick={() => { setQuery(""); update({ q: null, type: null, view: null }); }}>Clear filters</button></section> : <div className="lb-split">
-        <section className="lb-collection" aria-label="Approved deliverables"><ul>{filtered.map((item) => {
-          const file = item.files.find((file) => type === "All" || file.kind === type) ?? item.files[0];
-          return <li key={item.id}><button ref={(node) => { if (node) rowRefs.current.set(item.id, node); else rowRefs.current.delete(item.id); }} className="lb-row" onClick={() => select(item)} aria-pressed={selected?.id === item.id}>
-            <FileThumbnail key={file?.id} file={file} /><span className="lb-row-content"><strong>{item.title}</strong><span>Task #{item.number}</span><span>{item.agent} · {publishedDate(item.publishedAt)}</span><span>{item.files.length} {item.files.length === 1 ? "file or link" : "files & links"}</span></span>
-            <span className="sr-only">{file ? `${file.kind}: ${file.name}` : "Source unavailable"}</span>
-            {selected?.id === item.id && <span className="lb-selected" aria-hidden="true">✓</span>}
-          </button></li>;
-        })}</ul></section>
-        {selected && <section className="lb-detail" aria-label="Selected deliverable">
-          <button className="lb-button lb-back" onClick={back}>← Back to Library</button>
-          <div className="lb-detail-top"><span>Deliverable preview</span><span className="lb-published">✓ Live · Published</span></div>
-          <h2 ref={heading} tabIndex={-1} className="lb-detail-title">{selected.title}</h2>
-          <dl className="lb-metadata"><div><dt>Produced by</dt><dd>{selected.agent}</dd></div><div><dt>Published</dt><dd>{selected.publishedAt ? <time dateTime={selected.publishedAt} title={formatDate(selected.publishedAt)}>{publishedDate(selected.publishedAt)}</time> : "Date unavailable"}</dd></div><div><dt>Associated task</dt><dd><Link href={projectPath(slug, `/${selected.number}`)}>Task #{selected.number}</Link></dd></div></dl>
-          {selected.files.length > 1 && <div className="lb-attachments" role="group" aria-label="Task deliverables">{selected.files.map((file) => <button key={file.id} className="lb-file-choice" aria-pressed={selectedFile?.id === file.id} onClick={() => update({ file: file.id })}>{file.name}</button>)}</div>}
-          {selectedFile?.text ? <>
-            <DeliveredWork text={selectedFile.text} title={selected.title} from={selected.agent} />
-            <div className="lb-actions mt-3"><Link className="lb-button" href={projectPath(slug, `/${selected.number}`)}>View task #{selected.number} <span aria-hidden="true">↗</span></Link></div>
-          </> : selectedFile ? <DeliverablePreview key={`${selected.id}:${selectedFile.id}`} file={selectedFile} item={selected} slug={slug} /> : <div className="lb-fallback"><h3>Original unavailable</h3><p>No deliverable source is available. You can still view the task.</p></div>}
-        </section>}
-      </div>}
-    </>}
-  </div>;
+  return (
+    <div className="lb-page" data-detail={detail}>
+      <LibraryHeading slug={slug} projectName={projectName} />
+      {!result.ok ? (
+        <section className="lb-state" aria-busy={pending}>
+          <span className="lb-state-icon lb-warning" aria-hidden="true">
+            !
+          </span>
+          <h2 ref={errorHeading} tabIndex={-1} role="alert">
+            We couldn’t load the Output box
+          </h2>
+          <p>Check your connection and try again in a moment.</p>
+          <button className="lb-button lb-primary" onClick={refresh} disabled={pending}>
+            {pending ? "Trying again…" : "Try again"}
+          </button>
+        </section>
+      ) : items.length === 0 ? (
+        <section className="lb-state">
+          <span className="lb-state-icon" aria-hidden="true">
+            ◇
+          </span>
+          <h2>No approved work yet</h2>
+          <p>Deliverables will appear here when a marketing task reaches Live · Published.</p>
+          <Link className="lb-button lb-primary" href={tasksPath}>
+            View Marketing
+          </Link>
+        </section>
+      ) : (
+        <>
+          {refreshError && (
+            <div className="lb-refresh-error" role="alert">
+              We couldn’t refresh the Library. Your previous results are still shown.{" "}
+              <button className="lb-button" onClick={refresh} disabled={pending}>
+                Try again
+              </button>
+            </div>
+          )}
+          <div className="lb-toolbar" aria-label="Find approved work">
+            <label className="lb-search">
+              <span className="sr-only">Search approved work</span>
+              <span aria-hidden="true">⌕</span>
+              <input
+                type="search"
+                placeholder="Search approved work…"
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  update({ q: event.target.value || null, view: null });
+                }}
+              />
+            </label>
+            <div className="lb-filters" role="group" aria-label="Deliverable type">
+              {CONTENT_TYPES.map((value) => (
+                <button
+                  key={value}
+                  className="lb-filter"
+                  aria-pressed={type === value}
+                  onClick={() => update({ type: value === "All" ? null : value, file: null, view: null })}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+            <label className="lb-sort">
+              <span className="sr-only">Sort by publication date</span>
+              <select
+                value={oldest ? "oldest" : "newest"}
+                onChange={(event) => update({ sort: event.target.value === "oldest" ? "oldest" : null })}
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+              </select>
+            </label>
+            <button className="lb-button lb-refresh" onClick={refresh} disabled={pending}>
+              {pending ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+
+          <div className="lb-categories" role="group" aria-label="Marketing category">
+            {MARKETING_CATEGORIES.map((cat) => (
+              <button
+                key={cat}
+                className="lb-filter"
+                aria-pressed={category === cat}
+                onClick={() => update({ category: cat === "All" ? null : cat, file: null, view: null })}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          <p className="lb-count" role="status">
+            {pending
+              ? "Refreshing approved work…"
+              : `${filtered.length} ${filtered.length === 1 ? "deliverable" : "deliverables"} · ${filtered.reduce((count, item) => count + item.files.length, 0)} files & links`}
+          </p>
+
+          {filtered.length === 0 ? (
+            <section className="lb-state lb-no-matches">
+              <h2>No matching work</h2>
+              <p>Try another search or clear the filters.</p>
+              <button
+                className="lb-button"
+                onClick={() => {
+                  setQuery("");
+                  update({ q: null, type: null, category: null, view: null });
+                }}
+              >
+                Clear filters
+              </button>
+            </section>
+          ) : (
+            <div className="lb-split">
+              <section className="lb-collection" aria-label="Approved deliverables">
+                <ul>
+                  {filtered.map((item) => {
+                    const file = item.files.find((f) => type === "All" || f.kind === type) ?? item.files[0];
+                    return (
+                      <li key={item.id}>
+                        <button
+                          ref={(node) => {
+                            if (node) rowRefs.current.set(item.id, node);
+                            else rowRefs.current.delete(item.id);
+                          }}
+                          className="lb-row"
+                          onClick={() => select(item)}
+                          aria-pressed={selected?.id === item.id}
+                        >
+                          <FileThumbnail key={file?.id} file={file} />
+                          <span className="lb-row-content">
+                            <strong>{item.title}</strong>
+                            <span>Task #{item.number}</span>
+                            <span className="lb-row-tags">
+                              <span className="lb-category-tag">{item.category}</span>
+                              <span className={`lb-status-badge lb-status-${item.deliveryStatus}`}>
+                                {statusLabel(item.deliveryStatus)}
+                              </span>
+                            </span>
+                            <span>
+                              {item.agent} · {publishedDate(item.publishedAt)}
+                            </span>
+                            <span>
+                              {item.files.length} {item.files.length === 1 ? "file or link" : "files & links"}
+                            </span>
+                          </span>
+                          <span className="sr-only">{file ? `${file.kind}: ${file.name}` : "Source unavailable"}</span>
+                          {selected?.id === item.id && <span className="lb-selected" aria-hidden="true">✓</span>}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+              {selected && (
+                <section className="lb-detail" aria-label="Selected deliverable">
+                  <button className="lb-button lb-back" onClick={back}>
+                    ← Back to Library
+                  </button>
+                  <div className="lb-detail-top">
+                    <span>Deliverable preview</span>
+                    <span className={`lb-status-badge lb-status-${selected.deliveryStatus}`}>
+                      {statusLabel(selected.deliveryStatus)}
+                    </span>
+                  </div>
+                  <h2 ref={heading} tabIndex={-1} className="lb-detail-title">
+                    {selected.title}
+                  </h2>
+                  <dl className="lb-metadata">
+                    <div>
+                      <dt>Produced by</dt>
+                      <dd>{selected.agent}</dd>
+                    </div>
+                    <div>
+                      <dt>Category</dt>
+                      <dd>
+                        <span className="lb-category-tag">{selected.category}</span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Associated task</dt>
+                      <dd>
+                        <Link href={projectPath(slug, `/${selected.number}`)}>Task #{selected.number}</Link>
+                      </dd>
+                    </div>
+                    {selected.taskType && (
+                      <div>
+                        <dt>Task Type</dt>
+                        <dd>{selected.taskType}</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Published</dt>
+                      <dd>
+                        {selected.publishedAt ? (
+                          <time dateTime={selected.publishedAt} title={formatDate(selected.publishedAt)}>
+                            {publishedDate(selected.publishedAt)}
+                          </time>
+                        ) : (
+                          "Date unavailable"
+                        )}
+                      </dd>
+                    </div>
+                    {selected.implementedAt && (
+                      <div>
+                        <dt>Implemented</dt>
+                        <dd>
+                          {publishedDate(selected.implementedAt)} by {selected.implementedByName ?? "Team"}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+
+                  {selected.publishedUrls && selected.publishedUrls.length > 0 && (
+                    <div className="lb-published-urls">
+                      <strong>Published URLs:</strong>
+                      <ul className="lb-urls-list">
+                        {selected.publishedUrls.map((url, idx) => (
+                          <li key={idx} className="lb-url-item">
+                            <a href={url} target="_blank" rel="noopener noreferrer" className="lb-url-link">
+                              {url} <span aria-hidden="true">↗</span>
+                            </a>
+                            {selected.deliveryStatus === "live_published" ? (
+                              <span className="lb-url-status">✓ Live on Web</span>
+                            ) : (
+                              <span className="lb-url-status">Pending Verification</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {selected.files.length > 1 && (
+                    <div className="lb-attachments" role="group" aria-label="Task deliverables">
+                      {selected.files.map((file) => (
+                        <button
+                          key={file.id}
+                          className="lb-file-choice"
+                          aria-pressed={selectedFile?.id === file.id}
+                          onClick={() => update({ file: file.id })}
+                        >
+                          {file.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {selectedFile?.text ? (
+                    <>
+                      <DeliveredWork text={selectedFile.text} title={selected.title} from={selected.agent} />
+                      <div className="lb-actions mt-3">
+                        <Link className="lb-button" href={projectPath(slug, `/${selected.number}`)}>
+                          View task #{selected.number} <span aria-hidden="true">↗</span>
+                        </Link>
+                        <button
+                          className="lb-button"
+                          onClick={() => handleToggleImplemented(selected)}
+                          disabled={actionPending}
+                        >
+                          {selected.deliveryStatus === "implemented"
+                            ? "Marked as Implemented (Undo)"
+                            : "Mark as Implemented"}
+                        </button>
+                        {selected.publishedUrls && selected.publishedUrls.length > 0 && (
+                          <button
+                            className="lb-button"
+                            onClick={() => handleRetryVerification(selected)}
+                            disabled={actionPending}
+                          >
+                            {actionPending ? "Checking URLs…" : "Re-check URLs"}
+                          </button>
+                        )}
+                      </div>
+                      {actionError && (
+                        <p className="lb-download-error" role="alert">
+                          {actionError}
+                        </p>
+                      )}
+                    </>
+                  ) : selectedFile ? (
+                    <>
+                      <DeliverablePreview
+                        key={`${selected.id}:${selectedFile.id}`}
+                        file={selectedFile}
+                        item={selected}
+                        slug={slug}
+                        actionPending={actionPending}
+                        onToggleImplemented={() => handleToggleImplemented(selected)}
+                        onRetryVerification={() => handleRetryVerification(selected)}
+                      />
+                      {actionError && (
+                        <p className="lb-download-error" role="alert">
+                          {actionError}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <div className="lb-fallback">
+                      <h3>Original unavailable</h3>
+                      <p>No deliverable source is available. You can still view the task.</p>
+                      <div className="lb-actions mt-3">
+                        <button
+                          className="lb-button"
+                          onClick={() => handleToggleImplemented(selected)}
+                          disabled={actionPending}
+                        >
+                          {selected.deliveryStatus === "implemented"
+                            ? "Marked as Implemented (Undo)"
+                            : "Mark as Implemented"}
+                        </button>
+                      </div>
+                      {actionError && (
+                        <p className="lb-download-error" role="alert">
+                          {actionError}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </section>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
-function DeliverablePreview({ file, item, slug }: { file: LibraryFile; item: LibraryItem; slug: ProjectRef }) {
+function DeliverablePreview({
+  file,
+  item,
+  slug,
+  actionPending,
+  onToggleImplemented,
+  onRetryVerification,
+}: {
+  file: LibraryFile;
+  item: LibraryItem;
+  slug: ProjectRef;
+  actionPending: boolean;
+  onToggleImplemented: () => void;
+  onRetryVerification: () => void;
+}) {
   const supported = ["Graphics", "Videos"].includes(file.kind);
   const [state, setState] = useState<"loading" | "ready" | "error">(supported ? "loading" : "ready");
   const [attempt, setAttempt] = useState(0);
@@ -161,7 +591,12 @@ function DeliverablePreview({ file, item, slug }: { file: LibraryFile; item: Lib
   const [downloadError, setDownloadError] = useState(false);
   const downloadingRef = useRef(false);
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const source = file.local ? "Ziki attachment" : new URL(file.url).hostname;
   async function failed() {
     setState("error");
@@ -170,7 +605,9 @@ function DeliverablePreview({ file, item, slug }: { file: LibraryFile; item: Lib
       try {
         const response = await fetch(file.url, { method: "HEAD" });
         if (mounted.current && [403, 404, 410].includes(response.status)) setUnavailable(true);
-      } catch { /* A network error doesn't prove the original was removed. */ }
+      } catch {
+        /* A network error doesn't prove the original was removed. */
+      }
     }
   }
   // A file can finish loading before hydration, when its load event has already passed.
@@ -186,7 +623,9 @@ function DeliverablePreview({ file, item, slug }: { file: LibraryFile; item: Lib
   }
   async function download() {
     if (downloadingRef.current) return;
-    downloadingRef.current = true; setDownloading(true); setDownloadError(false);
+    downloadingRef.current = true;
+    setDownloading(true);
+    setDownloadError(false);
     try {
       // Blob download also works for cross-origin file URLs when their host permits CORS.
       const response = await fetch(file.url, { credentials: file.local ? "same-origin" : "omit" });
@@ -194,41 +633,148 @@ function DeliverablePreview({ file, item, slug }: { file: LibraryFile; item: Lib
         if ([404, 410].includes(response.status) && mounted.current) setUnavailable(true);
         throw new Error("Download failed");
       }
-      if (response.headers.get("content-type")?.includes("text/html")) throw new Error("The source returned a web page instead of the file");
+      if (response.headers.get("content-type")?.includes("text/html"))
+        throw new Error("The source returned a web page instead of the file");
       const blob = await response.blob();
       if (!mounted.current) return;
       const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a"); anchor.href = url; anchor.download = file.name;
-      document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = file.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch { if (mounted.current) setDownloadError(true); }
-    finally { downloadingRef.current = false; if (mounted.current) setDownloading(false); }
+    } catch {
+      if (mounted.current) setDownloadError(true);
+    } finally {
+      downloadingRef.current = false;
+      if (mounted.current) setDownloading(false);
+    }
   }
-  return <>
-    <div className="lb-media" aria-busy={state === "loading"}>
-      {unavailable ? <div className="lb-fallback"><FileMark file={file} /><h3>Original unavailable</h3><p>This source was removed or is no longer accessible.</p></div> : state === "error" ? <div className="lb-fallback" role="status"><FileMark file={file} /><h3>Preview couldn’t load</h3><p>You can try again or open the original.</p><button className="lb-button" onClick={() => { setState("loading"); setAttempt(attempt + 1); }}>Retry preview</button></div> : <>
-        {state === "loading" && <div className="lb-preview-loading" aria-hidden="true"><div className="lb-skeleton" /></div>}
-        {file.kind === "Graphics" ? (
-          // eslint-disable-next-line @next/next/no-img-element -- approved arbitrary deliverable URLs and authenticated local attachments
-          <img key={attempt} ref={settleImage} src={file.url} alt={`${item.title} — ${file.name}`} className={state === "loading" ? "lb-loading-media" : ""} onLoad={() => setState("ready")} onError={failed} referrerPolicy="no-referrer" />
-        ) : file.kind === "Videos" ? (
-          // eslint-disable-next-line jsx-a11y/media-has-caption -- the delivery contract has no caption track; the delivery summary and original remain available
-          <video key={attempt} ref={settleVideo} src={file.url} controls preload="metadata" aria-label={`${item.title} — ${file.name}`} onLoadedMetadata={() => setState("ready")} onError={failed}>
-          Your browser cannot preview this video. Open the original to watch it.
-        </video>) : <div className="lb-fallback"><FileMark file={file} />
-          <h3>{file.kind === "Links" || file.kind === "Articles" ? file.name : "Preview isn’t available for this file"}</h3>
-          <p>{file.kind === "Links" || file.kind === "Articles" ? source : "You can still open or download the original document."}</p>
-          {(file.kind === "Links" || file.kind === "Articles") && <p className="lb-delivery-note">{item.summary}</p>}
-        </div>}
-      </>}
-    </div>
-    <p className="sr-only" role="status">{state === "loading" ? `Loading preview for ${file.name}` : unavailable ? "Original unavailable" : state === "error" ? "Preview couldn’t load" : `${file.name} preview ready`}</p>
-    <div className="lb-file-description"><strong>{file.name}</strong><span>{file.kind}{file.size !== null ? ` · ${formatBytes(file.size)}` : ""} · {source}</span></div>
-    <div className="lb-actions">
-      {unavailable ? <span className="lb-button" aria-disabled="true">Original unavailable</span> : <a className="lb-button lb-primary" href={file.url} target="_blank" rel="noopener noreferrer">Open original <span aria-hidden="true">↗</span><span className="sr-only"> (opens in a new tab)</span></a>}
-      <Link className="lb-button" href={projectPath(slug, `/${item.number}`)}>View task #{item.number} <span aria-hidden="true">↗</span></Link>
-      {file.downloadable && <button className="lb-button" disabled={unavailable || downloading} onClick={download}>{downloading ? "Downloading…" : "Download"} <span aria-hidden="true">↓</span></button>}
-    </div>
-    {downloadError && <p className="lb-download-error" role="alert">The download failed. Try again, or open the original to save it from its source.</p>}
-  </>;
+  return (
+    <>
+      <div className="lb-media" aria-busy={state === "loading"}>
+        {unavailable ? (
+          <div className="lb-fallback">
+            <FileMark file={file} />
+            <h3>Original unavailable</h3>
+            <p>This source was removed or is no longer accessible.</p>
+          </div>
+        ) : state === "error" ? (
+          <div className="lb-fallback" role="status">
+            <FileMark file={file} />
+            <h3>Preview couldn’t load</h3>
+            <p>You can try again or open the original.</p>
+            <button
+              className="lb-button"
+              onClick={() => {
+                setState("loading");
+                setAttempt(attempt + 1);
+              }}
+            >
+              Retry preview
+            </button>
+          </div>
+        ) : (
+          <>
+            {state === "loading" && (
+              <div className="lb-preview-loading" aria-hidden="true">
+                <div className="lb-skeleton" />
+              </div>
+            )}
+            {file.kind === "Graphics" ? (
+              // eslint-disable-next-line @next/next/no-img-element -- approved arbitrary deliverable URLs and authenticated local attachments
+              <img
+                key={attempt}
+                ref={settleImage}
+                src={file.url}
+                alt={`${item.title} — ${file.name}`}
+                className={state === "loading" ? "lb-loading-media" : ""}
+                onLoad={() => setState("ready")}
+                onError={failed}
+                referrerPolicy="no-referrer"
+              />
+            ) : file.kind === "Videos" ? (
+              // eslint-disable-next-line jsx-a11y/media-has-caption -- the delivery contract has no caption track; the delivery summary and original remain available
+              <video
+                key={attempt}
+                ref={settleVideo}
+                src={file.url}
+                controls
+                preload="metadata"
+                aria-label={`${item.title} — ${file.name}`}
+                onLoadedMetadata={() => setState("ready")}
+                onError={failed}
+              >
+                Your browser cannot preview this video. Open the original to watch it.
+              </video>
+            ) : (
+              <div className="lb-fallback">
+                <FileMark file={file} />
+                <h3>{file.kind === "Links" || file.kind === "Articles" ? file.name : "Preview isn’t available for this file"}</h3>
+                <p>
+                  {file.kind === "Links" || file.kind === "Articles"
+                    ? source
+                    : "You can still open or download the original document."}
+                </p>
+                {(file.kind === "Links" || file.kind === "Articles") && (
+                  <p className="lb-delivery-note">{item.summary}</p>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      <p className="sr-only" role="status">
+        {state === "loading"
+          ? `Loading preview for ${file.name}`
+          : unavailable
+            ? "Original unavailable"
+            : state === "error"
+              ? "Preview couldn’t load"
+              : `${file.name} preview ready`}
+      </p>
+      <div className="lb-file-description">
+        <strong>{file.name}</strong>
+        <span>
+          {file.kind}
+          {file.size !== null ? ` · ${formatBytes(file.size)}` : ""} · {source}
+        </span>
+      </div>
+      <div className="lb-actions">
+        {unavailable ? (
+          <span className="lb-button" aria-disabled="true">
+            Original unavailable
+          </span>
+        ) : (
+          <a className="lb-button lb-primary" href={file.url} target="_blank" rel="noopener noreferrer">
+            Open original <span aria-hidden="true">↗</span>
+            <span className="sr-only"> (opens in a new tab)</span>
+          </a>
+        )}
+        <Link className="lb-button" href={projectPath(slug, `/${item.number}`)}>
+          View task #{item.number} <span aria-hidden="true">↗</span>
+        </Link>
+        {file.downloadable && (
+          <button className="lb-button" disabled={unavailable || downloading} onClick={download}>
+            {downloading ? "Downloading…" : "Download"} <span aria-hidden="true">↓</span>
+          </button>
+        )}
+        <button className="lb-button" onClick={onToggleImplemented} disabled={actionPending}>
+          {item.deliveryStatus === "implemented" ? "Marked as Implemented (Undo)" : "Mark as Implemented"}
+        </button>
+        {item.publishedUrls && item.publishedUrls.length > 0 && (
+          <button className="lb-button" onClick={onRetryVerification} disabled={actionPending}>
+            {actionPending ? "Checking URLs…" : "Re-check URLs"}
+          </button>
+        )}
+      </div>
+      {downloadError && (
+        <p className="lb-download-error" role="alert">
+          The download failed. Try again, or open the original to save it from its source.
+        </p>
+      )}
+    </>
+  );
 }

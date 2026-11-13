@@ -71,13 +71,15 @@ export const deliveryBodySchema = z
     deliverableText: deliverableText.optional(),
     /** Links to the finished work. Marketing work only. */
     deliverableUrls: z.array(z.string().trim().min(1).max(2048)).max(20).optional(),
+    /** Candidate published URLs submitted for external verification. Marketing work only. */
+    publishedUrls: z.array(z.string().trim().min(1).max(2048)).max(20).optional(),
     /** Uploaded files to attach (`POST /api/v1/attachments`). Marketing work only. */
     attachmentIds: z.array(z.string().trim().min(1).max(191)).max(MAX_ATTACHMENTS_PER_ITEM).optional(),
   })
   .strict();
 
 const PRODUCT_ONLY_DELIVERY_FIELDS = ["pullRequestUrl", "headSha", "testResults"] as const;
-const MARKETING_ONLY_DELIVERY_FIELDS = ["deliverableText", "deliverableUrls", "attachmentIds"] as const;
+const MARKETING_ONLY_DELIVERY_FIELDS = ["deliverableText", "deliverableUrls", "attachmentIds", "publishedUrls"] as const;
 
 /** Where work can be delivered: being worked on, or delivered again before it merges. */
 const DELIVERABLE = new Set(["in_progress", "done", "merge"]);
@@ -96,6 +98,15 @@ export type DeliveryEntry = {
   deliverableText: string | null;
   /** Links to the finished work, on marketing work. */
   deliverableUrls: string[];
+  publishedUrls: string[];
+  deliveryStatus: string;
+  previousStatus: string | null;
+  implementedAt: Date | null;
+  implementedById: string | null;
+  verifiedPublishedAt: Date | null;
+  verifiedByManagerId: string | null;
+  verificationEvidence: unknown;
+  manualOverrideReason: string | null;
   headSha: string | null;
   screenshots: string[];
   testResults: string | null;
@@ -106,6 +117,7 @@ export type DeliveryEntry = {
   createdAt: Date;
   updatedAt: Date;
   replies: EntryReply[];
+  attachments?: Array<{ id: string; filename: string; contentType: string; size: number }>;
 };
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -133,18 +145,31 @@ export async function deliveryEntries(bug: { id: string; pullRequestUrl: string 
       pullRequestUrl: true,
       deliverableText: true,
       deliverableUrls: true,
+      publishedUrls: true,
+      deliveryStatus: true,
+      previousStatus: true,
+      implementedAt: true,
+      implementedById: true,
+      verifiedPublishedAt: true,
+      verifiedByManagerId: true,
+      verificationEvidence: true,
+      manualOverrideReason: true,
       headSha: true,
       screenshots: true,
       testResults: true,
       receipt: true,
+      currentSequence: true,
       createdAt: true,
       updatedAt: true,
       agent: { select: { name: true } },
       beneficiary: { select: { name: true } },
       replies: entryReplySelect,
+      attachments: {
+        select: { id: true, filename: true, contentType: true, size: true, deliverySequence: true },
+      },
     },
   });
-  return rows.map(({ agent, beneficiary, replies, receipt, ...row }) => ({
+  return rows.map(({ agent, beneficiary, replies, receipt, attachments, currentSequence, ...row }) => ({
     ...row,
     receipt: storedReceipt(receipt),
     agentName: agent.name,
@@ -152,6 +177,11 @@ export async function deliveryEntries(bug: { id: string; pullRequestUrl: string 
     // Marketing work has no pull request, so every marketing delivery is current.
     current: row.pullRequestUrl === bug.pullRequestUrl,
     replies: toEntryReplies(replies),
+    attachments: attachments
+      ? attachments
+          .filter((att) => att.deliverySequence === currentSequence)
+          .map(({ id, filename, contentType, size }) => ({ id, filename, contentType, size }))
+      : [],
   }));
 }
 
@@ -344,7 +374,22 @@ export async function deliverWork(
   const attachmentIds = marketing ? [...new Set(body.attachmentIds ?? [])] : [];
   if (attachmentIds.length > 0) {
     const owned = await prisma.attachment.count({
-      where: { id: { in: attachmentIds }, uploaderId: agent.ownerId, bugId: null, ideaId: null, commentId: null, confirmationId: null },
+      where: {
+        id: { in: attachmentIds },
+        uploaderId: agent.ownerId,
+        commentId: null,
+        confirmationId: null,
+        redesignProposalId: null,
+        securityFindingId: null,
+        ideaId: null,
+        deliveryId: null,
+        OR: [{ bugId: null }, { bugId: bug.id }],
+        uploader: {
+          memberships: {
+            some: { organisationId: agent.organisationId },
+          },
+        },
+      },
     });
     if (owned !== attachmentIds.length) {
       const message = "One or more attachmentIds weren't found, belong to someone else, or are already attached.";
@@ -353,91 +398,152 @@ export async function deliverWork(
   }
   const from = bug.substatus;
 
-  const { delivery, replaced } = await prisma.$transaction(async (tx) => {
-    const existing = await tx.delivery.findUnique({ where: { bugId_agentId: { bugId: bug.id, agentId: agent.agentId } }, select: { id: true } });
-    const data = {
-      beneficiaryUserId: beneficiaryUserId!,
-      summary: body.summary,
-      description: body.description,
-      pullRequestUrl,
-      deliverableText: marketing ? body.deliverableText ?? null : null,
-      deliverableUrls: marketing ? body.deliverableUrls ?? [] : [],
-      headSha,
-      screenshots,
-      testResults,
-      // Delivering again replaces the delivery, its receipt included.
-      receipt: body.receipt ?? Prisma.JsonNull,
-    };
-    const saved = existing
-      ? await tx.delivery.update({ where: { id: existing.id }, data, select: { id: true } })
-      : await tx.delivery.create({ data: { ...data, bugId: bug.id, agentId: agent.agentId }, select: { id: true } });
+  let deliveryResult: { delivery: { id: string }; replaced: boolean };
+  try {
+    deliveryResult = await prisma.$transaction(async (tx) => {
+      // Concurrency control: acquire an exclusive lock on the parent Bug row.
+      await tx.$queryRaw`SELECT "id" FROM "Bug" WHERE "id" = ${bug.id} FOR UPDATE`;
 
-    // The deliverer's own uploads, attached to the issue as part of the delivery.
-    if (attachmentIds.length > 0) {
-      await linkAttachments(tx, { ids: attachmentIds, uploaderId: agent.ownerId, bugId: bug.id });
-    }
-
-    await tx.bug.update({
-      where: { id: bug.id },
-      data: {
-        ...moveTo("requires_review"),
-        ...(screenshots.length ? { proofLinks: { push: screenshots } } : {}),
-        ...(marketing ? {} : { pullRequestUrl: pullRequestUrl!, pullRequestHeadSha: headSha }),
-      },
-    });
-    if (!marketing) {
-      // #539: verdicts recorded without a pull request can only have meant this one.
-      await tx.testVerdict.updateMany({
-        where: { bugId: bug.id, OR: [{ pullRequestUrl: null }, { pullRequestUrl: "" }] },
-        data: { pullRequestUrl: pullRequestUrl! },
+      // Recheck the task's status and claim inside the locked transaction
+      const freshBug = await tx.bug.findUnique({
+        where: { id: bug.id },
+        select: { status: true, isDeleted: true },
       });
-    }
-    // #replacement-pr: the accepted pull request is closed unmerged; the acceptance goes
-    // with it and the replacement is reviewed afresh.
-    if (replacing) {
-      await releaseAcceptedFix(tx, { bugId: bug.id, acceptanceId: replacing.acceptanceId, previous: replacing.previous, next: pullRequestUrl!, actorUserId: agent.ownerId });
-    }
-    await tx.bugActivity.create({
-      data: {
-        bugId: bug.id,
-        actorId: agent.ownerId,
-        type: "status_changed",
-        summary: marketing
-          ? "delivered the work"
-          : replacing
-            ? `delivered the work in ${pullRequestUrl}, replacing ${replacing.previous}`
-            : `delivered the work in ${pullRequestUrl}`,
-        metadata: {
-          field: "status",
-          from,
-          to: "requires_review",
+      if (!freshBug || freshBug.isDeleted || !DELIVERABLE.has(freshBug.status)) {
+        throw new IssueApiError(409, "Work is delivered while the issue is In progress (or again before it merges). Win a bid or accept an offer first.", { error: "not_in_progress" });
+      }
+
+      if (!onBehalfOf) {
+        const activeClaim = await tx.issueClaim.findFirst({
+          where: { bugId: bug.id, agentId: agent.agentId, status: "active", releasedAt: null },
+          select: { id: true },
+        });
+        if (!activeClaim) {
+          throw new IssueApiError(409, "Only the agent holding the claim delivers the work. Win a bid or accept an offer first.", { error: "no_claim" });
+        }
+      }
+
+      const existing = await tx.delivery.findUnique({
+        where: { bugId_agentId: { bugId: bug.id, agentId: agent.agentId } },
+        select: { id: true, currentSequence: true },
+      });
+      const nextSequence = existing ? existing.currentSequence + 1 : 1;
+
+      const publishedUrls = marketing ? body.publishedUrls ?? [] : [];
+      const deliveryStatus = marketing && publishedUrls.length > 0 ? "publication_pending" : "ready_to_use";
+
+      const data = {
+        beneficiaryUserId: beneficiaryUserId!,
+        summary: body.summary,
+        description: body.description,
+        pullRequestUrl,
+        deliverableText: marketing ? body.deliverableText ?? null : null,
+        deliverableUrls: marketing ? body.deliverableUrls ?? [] : [],
+        publishedUrls,
+        deliveryStatus,
+        previousStatus: null,
+        implementedAt: null,
+        implementedById: null,
+        verifiedPublishedAt: null,
+        verifiedByManagerId: null,
+        verificationEvidence: Prisma.JsonNull,
+        manualOverrideReason: null,
+        headSha,
+        screenshots,
+        testResults,
+        // Delivering again replaces the delivery, its receipt included.
+        receipt: body.receipt ?? Prisma.JsonNull,
+        currentSequence: nextSequence,
+      };
+      const saved = existing
+        ? await tx.delivery.update({ where: { id: existing.id }, data, select: { id: true, currentSequence: true } })
+        : await tx.delivery.create({ data: { ...data, bugId: bug.id, agentId: agent.agentId }, select: { id: true, currentSequence: true } });
+
+      // The deliverer's own uploads, attached to the issue and isolated to this delivery sequence.
+      if (attachmentIds.length > 0) {
+        await linkAttachments(tx, {
+          ids: attachmentIds,
+          uploaderId: agent.ownerId,
+          bugId: bug.id,
           deliveryId: saved.id,
-          ...(replacing ? { replacesPullRequestUrl: replacing.previous } : {}),
-          ...(marketing
-            ? { deliverableUrls: body.deliverableUrls ?? [], attachmentIds }
-            : { pullRequestUrl: pullRequestUrl! }),
-          replaced: Boolean(existing),
-          ...(onBehalfOf ? { onBehalfOf: true, creditedUserId: beneficiaryUserId! } : {}),
+          deliverySequence: saved.currentSequence,
+          organisationId: agent.organisationId,
+        });
+      }
+
+      await tx.bug.update({
+        where: { id: bug.id },
+        data: {
+          ...moveTo("requires_review"),
+          ...(screenshots.length ? { proofLinks: { push: screenshots } } : {}),
+          ...(marketing ? {} : { pullRequestUrl: pullRequestUrl!, pullRequestHeadSha: headSha }),
         },
-      },
+      });
+      if (!marketing) {
+        // #539: verdicts recorded without a pull request can only have meant this one.
+        await tx.testVerdict.updateMany({
+          where: { bugId: bug.id, OR: [{ pullRequestUrl: null }, { pullRequestUrl: "" }] },
+          data: { pullRequestUrl: pullRequestUrl! },
+        });
+      }
+      // #replacement-pr: the accepted pull request is closed unmerged; the acceptance goes
+      // with it and the replacement is reviewed afresh.
+      if (replacing) {
+        await releaseAcceptedFix(tx, { bugId: bug.id, acceptanceId: replacing.acceptanceId, previous: replacing.previous, next: pullRequestUrl!, actorUserId: agent.ownerId });
+      }
+      await tx.bugActivity.create({
+        data: {
+          bugId: bug.id,
+          actorId: agent.ownerId,
+          type: "status_changed",
+          summary: marketing
+            ? "delivered the work"
+            : replacing
+              ? `delivered the work in ${pullRequestUrl}, replacing ${replacing.previous}`
+              : `delivered the work in ${pullRequestUrl}`,
+          metadata: {
+            field: "status",
+            from,
+            to: "requires_review",
+            deliveryId: saved.id,
+            ...(replacing ? { replacesPullRequestUrl: replacing.previous } : {}),
+            ...(marketing
+              ? { deliverableUrls: body.deliverableUrls ?? [], attachmentIds, deliverySequence: saved.currentSequence }
+              : { pullRequestUrl: pullRequestUrl! }),
+            replaced: Boolean(existing),
+            ...(onBehalfOf ? { onBehalfOf: true, creditedUserId: beneficiaryUserId! } : {}),
+          },
+        },
+      });
+      const payload: Prisma.InputJsonObject = {
+        issueId: bug.id,
+        projectId: bug.projectId,
+        deliveryId: saved.id,
+        ...(marketing ? { deliverableUrls: body.deliverableUrls ?? [] } : { pullRequestUrl: pullRequestUrl!, headSha }),
+        summary: body.summary,
+        agentId: agent.agentId,
+        ...(replacing ? { replacesPullRequestUrl: replacing.previous } : {}),
+        // #delivery-receipt: the receipt travels with the event, so a listener can judge against it.
+        ...(body.receipt ? { receipt: body.receipt } : {}),
+        // #stranded-delivery: a manager agent filed it for the person credited.
+        ...(onBehalfOf ? { onBehalfOf: true, filedBy: agent.agentId, creditedUserId: beneficiaryUserId! } : {}),
+      };
+      await publish(tx, { organisationId: agent.organisationId, type: "issue.delivered", payload, actorAgentId: agent.agentId, bugId: bug.id });
+      await audit({ agentId: agent.agentId, organisationId: agent.organisationId }, "issue.delivered", `bug:${bug.id}`, payload, { db: tx, bugId: bug.id });
+      return { delivery: saved, replaced: Boolean(existing) };
     });
-    const payload: Prisma.InputJsonObject = {
-      issueId: bug.id,
-      projectId: bug.projectId,
-      deliveryId: saved.id,
-      ...(marketing ? { deliverableUrls: body.deliverableUrls ?? [] } : { pullRequestUrl: pullRequestUrl!, headSha }),
-      summary: body.summary,
-      agentId: agent.agentId,
-      ...(replacing ? { replacesPullRequestUrl: replacing.previous } : {}),
-      // #delivery-receipt: the receipt travels with the event, so a listener can judge against it.
-      ...(body.receipt ? { receipt: body.receipt } : {}),
-      // #stranded-delivery: a manager agent filed it for the person credited.
-      ...(onBehalfOf ? { onBehalfOf: true, filedBy: agent.agentId, creditedUserId: beneficiaryUserId! } : {}),
-    };
-    await publish(tx, { organisationId: agent.organisationId, type: "issue.delivered", payload, actorAgentId: agent.agentId, bugId: bug.id });
-    await audit({ agentId: agent.agentId, organisationId: agent.organisationId }, "issue.delivered", `bug:${bug.id}`, payload, { db: tx, bugId: bug.id });
-    return { delivery: saved, replaced: Boolean(existing) };
-  });
+  } catch (error) {
+    if (error instanceof IssueApiError) {
+      const status = error.status as 400 | 403 | 404 | 409 | 422;
+      return { status, error: (error.body?.error as string) ?? "invalid_request", message: error.message };
+    }
+    if (error instanceof Error && error.message.includes("Failed to link all attachments")) {
+      const message = "One or more attachmentIds weren't found, belong to someone else, or are already attached.";
+      return { status: 422, error: "invalid_attachments", message, field: "attachmentIds" };
+    }
+    throw error;
+  }
+  const { delivery, replaced } = deliveryResult;
 
   // #stranded-delivery: the judgements already given on this pull request are
   // evaluated at once, as a new judgement would be, so enough of them make it Done.

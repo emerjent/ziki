@@ -89,3 +89,20 @@
 @media(max-width:1000px) { .lb-toolbar { align-items:stretch; } .lb-search { flex-basis:250px; } .lb-filters { order:3; flex-basis:100%; } .lb-detail { padding:20px; } .lb-metadata { grid-template-columns:1fr 1fr; } }
 @media(max-width:767px) { .lb-heading { flex-direction:column; gap:12px; margin-bottom:24px; } .lb-heading h1 { font-size:25px; } .lb-breadcrumb { margin-bottom:20px; } .lb-split { grid-template-columns:1fr; } .lb-detail { display:none; } .lb-page[data-detail=true] .lb-detail { display:block; } .lb-page[data-detail=true] :is(.lb-collection,.lb-toolbar,.lb-count) { display:none; } .lb-back { display:inline-flex; } .lb-page { padding:8px; } .lb-search input { font-size:16px; } .lb-media { min-height:240px; } .lb-filters { gap:5px; } .lb-filter { padding:10px; } .lb-state { min-height:430px; padding:30px 18px; } }
 @media(pointer:coarse) { .lb-page :is(button,select,.lb-button) { min-height:44px; } }
+
+/* Phase 2: Categories, Statuses, and Verification UI */
+.lb-categories { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; width:100%; }
+.lb-category-tag { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.4px; color:var(--zk-muted); background:var(--zk-chip); padding:2px 6px; border-radius:4px; }
+.lb-status-badge { display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:500; white-space:nowrap; }
+.lb-status-live_published { background:var(--zk-ok-bg); color:var(--zk-ok-fg); }
+.lb-status-implemented { background:var(--zk-tint); color:var(--zk-accent); }
+.lb-status-publication_pending { background:var(--zk-warn-bg); color:var(--zk-warn-fg); }
+.lb-status-ready_to_use { background:var(--zk-chip); color:var(--zk-text2); }
+.lb-row-tags { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:2px; }
+.lb-urls-list { margin:10px 0 16px; padding:0; list-style:none; display:grid; gap:6px; }
+.lb-url-item { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; background:var(--zk-bg); border-radius:6px; font-size:12px; }
+.lb-url-link { color:var(--zk-accent); text-decoration:none; overflow-wrap:anywhere; }
+.lb-url-link:hover { text-decoration:underline; }
+.lb-url-status { font-size:11px; color:var(--zk-ok-fg); font-weight:500; }
+.lb-url-error { font-size:11px; color:var(--zk-bad-fg); }
+

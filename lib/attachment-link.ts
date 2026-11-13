@@ -17,17 +17,25 @@ export function attachmentIdsInMarkdown(text: string | null | undefined): string
 }
 
 /**
- * What a file is attached to: an issue (and maybe one of its comments or
- * confirmation entries), an idea (#idea-table), or a private security finding
- * (#security-findings), whose files only the people who may see it can read.
+ * What a file is attached to: an issue (and maybe one of its comments,
+ * confirmation entries, or delivery submissions), an idea (#idea-table),
+ * or a private security finding (#security-findings), whose files only the
+ * people who may see it can read.
  */
 export type AttachmentTarget =
-  | { bugId: string; commentId?: string | null; confirmationId?: string | null }
+  | {
+      bugId: string;
+      commentId?: string | null;
+      confirmationId?: string | null;
+      deliveryId?: string | null;
+      deliverySequence?: number | null;
+      organisationId?: string;
+    }
   | { ideaId: string }
   | { securityFindingId: string };
 
 /**
- * Links freshly uploaded files to the issue, comment or idea being saved (#215).
+ * Links freshly uploaded files to the issue, comment, delivery, or idea being saved (#215).
  * Only the uploader's own, not-yet-linked files can be claimed, so nobody can
  * attach - or steal - someone else's upload by guessing its id.
  */
@@ -35,15 +43,67 @@ export async function linkAttachments(
   db: Db,
   { ids, uploaderId, ...target }: { ids: string[]; uploaderId: string } & AttachmentTarget,
 ): Promise<number> {
-  if (ids.length === 0) return 0;
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) return 0;
+
+  const baseWhere: Prisma.AttachmentWhereInput = {
+    id: { in: uniqueIds },
+    uploaderId,
+    commentId: null,
+    confirmationId: null,
+    redesignProposalId: null,
+    securityFindingId: null,
+  };
+
+  if ("deliveryId" in target && target.deliveryId) {
+    // Delivery submission: verify tenant membership, unattached or same-task, and deliveryId null
+    const where: Prisma.AttachmentWhereInput = {
+      ...baseWhere,
+      ideaId: null,
+      deliveryId: null,
+      OR: [{ bugId: null }, { bugId: target.bugId }],
+      ...(target.organisationId
+        ? {
+            uploader: {
+              memberships: {
+                some: { organisationId: target.organisationId },
+              },
+            },
+          }
+        : {}),
+    };
+
+    const result = await db.attachment.updateMany({
+      where,
+      data: {
+        bugId: target.bugId,
+        deliveryId: target.deliveryId,
+        deliverySequence: target.deliverySequence ?? null,
+      },
+    });
+
+    if (result.count !== uniqueIds.length) {
+      throw new Error(`Failed to link all attachments: expected ${uniqueIds.length}, updated ${result.count}`);
+    }
+    return result.count;
+  }
+
   const result = await db.attachment.updateMany({
-    where: { id: { in: ids }, uploaderId, bugId: null, ideaId: null, commentId: null, confirmationId: null, securityFindingId: null },
+    where: {
+      ...baseWhere,
+      ideaId: null,
+      bugId: null,
+    },
     data:
       "securityFindingId" in target
         ? { securityFindingId: target.securityFindingId }
         : "ideaId" in target
           ? { ideaId: target.ideaId }
-          : { bugId: target.bugId, commentId: target.commentId ?? null, confirmationId: target.confirmationId ?? null },
+          : {
+              bugId: target.bugId,
+              commentId: target.commentId ?? null,
+              confirmationId: target.confirmationId ?? null,
+            },
   });
   return result.count;
 }

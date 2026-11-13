@@ -41,6 +41,7 @@ export const marketingDeliveryBodySchema = z
     description: entryDescription,
     deliverableText: deliverableText.optional(),
     deliverableUrls: z.array(httpUrl).max(20).optional(),
+    publishedUrls: z.array(httpUrl).max(20).optional(),
     attachmentIds: z.array(z.string().trim().min(1).max(191)).max(MAX_ATTACHMENTS_PER_ITEM).optional(),
     screenshots: z.array(z.string().trim().min(1).max(2048)).max(20).optional(),
     /** What was checked about the work, what was not, and what the reviewer should look at (#delivery-receipt). */

@@ -178,12 +178,24 @@ export type AcceptBlock = {
  * most two sentences and a full description. A reject may also record an
  * anti-pattern in the project's mistake registry.
  */
+export const urlManualOverrideSchema = z.object({
+  url: z.string().trim().url(),
+  reason: z.string().trim().min(5).max(1000),
+});
+
+export type UrlManualOverride = z.infer<typeof urlManualOverrideSchema>;
+
 export const mergeReviewBodySchema = z.object({
   verdict: z.enum(["accept", "reject"]),
   summary: entrySummary,
   description: entryDescription,
   mistake: recordMistakeSchema.omit({ bugId: true }).optional(),
   projectId: z.string().optional(),
+  onBehalfOfUserId: z.string().trim().min(1).max(191).optional(),
+  confirmPublication: z.boolean().optional(),
+  manualOverrideReason: z.string().trim().max(1000).optional(),
+  confirmedUrls: z.array(z.string().trim()).optional(),
+  manualOverrides: z.array(urlManualOverrideSchema).optional(),
 });
 
 export type MergeReviewInput = {
@@ -191,6 +203,11 @@ export type MergeReviewInput = {
   summary: string;
   description: string;
   mistake?: Omit<RecordMistakeInput, "bugId">;
+  onBehalfOfUserId?: string;
+  confirmPublication?: boolean;
+  manualOverrideReason?: string;
+  confirmedUrls?: string[];
+  manualOverrides?: UrlManualOverride[];
 };
 
 /** Parses a raw `POST /merge` body into a review, or the 400 naming the field. */
@@ -200,8 +217,21 @@ export function parseMergeReview(
   const body = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const parsed = mergeReviewBodySchema.safeParse(body);
   if (parsed.success) {
-    const { verdict, summary, description, mistake } = parsed.data;
-    return { ok: true, review: { verdict, summary, description, ...(mistake ? { mistake } : {}) } };
+    const { verdict, summary, description, mistake, onBehalfOfUserId, confirmPublication, manualOverrideReason, confirmedUrls, manualOverrides } = parsed.data;
+    return {
+      ok: true,
+      review: {
+        verdict,
+        summary,
+        description,
+        ...(mistake ? { mistake } : {}),
+        ...(onBehalfOfUserId ? { onBehalfOfUserId } : {}),
+        ...(confirmPublication !== undefined ? { confirmPublication } : {}),
+        ...(manualOverrideReason ? { manualOverrideReason } : {}),
+        ...(confirmedUrls ? { confirmedUrls } : {}),
+        ...(manualOverrides ? { manualOverrides } : {}),
+      },
+    };
   }
   const issue = parsed.error.issues[0];
   const field = typeof issue?.path[0] === "string" ? issue.path[0] : undefined;
@@ -236,12 +266,13 @@ async function saveMergeReview(
   review: MergeReviewInput,
   pullRequestUrl: string | null,
   headSha: string | null,
+  managerUserId: string = agent.ownerId,
 ): Promise<{ review: StoredMergeReview; replaced: boolean }> {
   const data = {
     verdict: review.verdict,
     summary: review.summary,
     description: review.description,
-    onBehalfOfUserId: agent.ownerId,
+    onBehalfOfUserId: managerUserId,
     pullRequestUrl,
     headSha,
   };
@@ -307,6 +338,17 @@ async function reviewFix(
     return { status: 403, error: "insufficient_level", message: "Only manager or merger agents can accept a fix." };
   }
 
+  const managerUserId = review.onBehalfOfUserId ?? agent.ownerId;
+  if (review.onBehalfOfUserId && review.onBehalfOfUserId !== agent.ownerId) {
+    const membership = await prisma.membership.findFirst({
+      where: { organisationId: agent.organisationId, userId: managerUserId, organisation: { archivedAt: null } },
+      select: { id: true },
+    });
+    if (!membership) {
+      return { status: 403, error: "not_independent", message: "The specified manager does not belong to this organisation." };
+    }
+  }
+
   // #493: the merger is an independent reviewer too. The same rule that keeps
   // a claim holder's side out of the verdicts keeps it out of the review —
   // otherwise an owner could accept their own fix and collect the solver
@@ -314,6 +356,12 @@ async function reviewFix(
   const conflict = reviewerConflict({ id: agent.agentId, ownerUserId: agent.ownerId }, bug);
   if (conflict) {
     return { status: 403, error: "not_independent", message: new ReviewerNotIndependentError(conflict).message };
+  }
+  if (managerUserId !== agent.ownerId) {
+    const managerConflict = reviewerConflict({ id: agent.agentId, ownerUserId: managerUserId }, bug);
+    if (managerConflict) {
+      return { status: 403, error: "not_independent", message: new ReviewerNotIndependentError(managerConflict).message };
+    }
   }
 
   if (marketing && bug.substatus !== "accepted") {
@@ -392,8 +440,8 @@ async function reviewFix(
         };
       }
       // Marketing work has no pull request, so its review names neither one nor a head commit.
-      const saved = await saveMergeReview(tx, agent, bug, review, null, null);
-      return acceptMarketing(tx, agent, bug, claim, solverUserId, reviewers, saved);
+      const saved = await saveMergeReview(tx, agent, bug, review, null, null, managerUserId);
+      return acceptMarketing(tx, agent, bug, claim, solverUserId, reviewers, saved, review, managerUserId);
     });
   }
 
@@ -478,7 +526,7 @@ async function reviewFix(
 
   return prisma.$transaction(async (tx) => {
     // The accept: ready to merge, without resolving or awarding points.
-    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, headSha);
+    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, headSha, managerUserId);
     // Threshold-only: the accept is a vote; only the one that reaches acceptThreshold moves the issue.
     let decision: ThresholdDecision | null = null;
     if (voting) {
@@ -746,14 +794,94 @@ async function acceptMarketing(
   solverUserId: string | null,
   rewardedReviewerUserIds: readonly string[],
   saved: { review: StoredMergeReview; replaced: boolean },
+  review?: MergeReviewInput,
+  managerUserId: string = agent.ownerId,
 ): Promise<AcceptFixResult> {
   const moved = moveTo(trackRules(bug.track).acceptMovesTo);
   await tx.bug.update({ where: { id: bug.id }, data: moved });
   await closeSupportThreadsForIssue(tx, { bugId: bug.id, reason: "fix_live" });
+
+  // Update the active marketing delivery's status based on manager confirmation (#marketing-engine)
+  const delivery = await tx.delivery.findFirst({
+    where: {
+      bugId: bug.id,
+      ...(solverUserId ? { beneficiaryUserId: solverUserId } : {}),
+    },
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+  });
+
+  if (delivery) {
+    const publishedUrls = delivery.publishedUrls ?? [];
+    const confirmPub = review?.confirmPublication ?? (publishedUrls.length > 0);
+    let policyPassed = false;
+    const manualOverridesRecorded: Array<{ url: string; reason: string }> = [];
+
+    if (confirmPub && publishedUrls.length > 0) {
+      const existingEvidence = delivery.verificationEvidence as {
+        results?: Array<{ url: string; ok: boolean; status?: number | null; error?: string }>;
+        [key: string]: unknown;
+      } | null;
+
+      const probeResults = existingEvidence?.results ?? [];
+      const manualOverrides = review?.manualOverrides ?? [];
+      const generalOverrideReason = review?.manualOverrideReason?.trim();
+
+      let allUrlsSatisfied = true;
+      for (const url of publishedUrls) {
+        const probe = probeResults.find((p) => p.url === url);
+        const hasPassedProbe = probe?.ok === true;
+
+        const specificOverride = manualOverrides.find((o) => o.url === url && o.reason.trim().length >= 5);
+        const hasValidOverride = Boolean(specificOverride) || (Boolean(generalOverrideReason) && generalOverrideReason!.length >= 5);
+
+        if (!hasPassedProbe && !hasValidOverride) {
+          allUrlsSatisfied = false;
+          break;
+        }
+
+        if (!hasPassedProbe && (specificOverride || generalOverrideReason)) {
+          manualOverridesRecorded.push({
+            url,
+            reason: specificOverride?.reason.trim() ?? generalOverrideReason!,
+          });
+        }
+      }
+
+      policyPassed = allUrlsSatisfied;
+    }
+
+    const nextStatus = policyPassed ? "live_published" : "ready_to_use";
+    const verifiedPublishedAt = policyPassed ? new Date() : null;
+    const verifiedByManagerId = policyPassed ? managerUserId : null;
+    const manualOverrideReason = manualOverridesRecorded.length > 0
+      ? manualOverridesRecorded.map((o) => `${o.url}: ${o.reason}`).join("; ")
+      : review?.manualOverrideReason?.trim() || null;
+
+    const updatedEvidence = {
+      ...(typeof delivery.verificationEvidence === "object" && delivery.verificationEvidence !== null
+        ? (delivery.verificationEvidence as Record<string, unknown>)
+        : {}),
+      policyPassed,
+      confirmedAt: new Date().toISOString(),
+      confirmedByUserId: managerUserId,
+      overrides: manualOverridesRecorded,
+    };
+
+    await tx.delivery.update({
+      where: { id: delivery.id },
+      data: {
+        deliveryStatus: nextStatus,
+        verifiedPublishedAt,
+        verifiedByManagerId,
+        manualOverrideReason,
+        verificationEvidence: updatedEvidence,
+      },
+    });
+  }
   await tx.bugActivity.create({
     data: {
       bugId: bug.id,
-      actorId: agent.ownerId,
+      actorId: managerUserId,
       type: "status_changed",
       summary: "Marketing work accepted by a manager agent and published",
       metadata: {
@@ -763,6 +891,7 @@ async function acceptMarketing(
         published: true,
         mergeReviewId: saved.review.id,
         solverUserId,
+        managerUserId,
         rewardedReviewerUserIds: [...rewardedReviewerUserIds],
       },
     },

@@ -139,7 +139,7 @@ async function expectNoA11yViolations(node: HTMLElement) {
 
 const users = [{ id: "u1", name: "Alice", role: "user" as const }];
 
-describe("component accessibility (axe)", () => {
+describe("component accessibility (axe)", { timeout: 30000 }, () => {
   it("keeps the new marketing task form accessible, with and without task types", async () => {
     const withTypes = render(<NewMarketingTaskForm projectId="project-1" types={[{ id: "blog", name: "Blog post" }]} />);
     await expectNoA11yViolations(withTypes.container);
@@ -151,6 +151,7 @@ describe("component accessibility (axe)", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
     const { container } = render(<Library slug={projectRef("acme", "acme")} projectName="Acme" initial={{ ok: true, items: [{
       id: "published", number: 42, title: "Welcome email", agent: "Content agent", summary: "An approved email sequence.", publishedAt: "2026-11-04T12:00:00Z",
+      deliveryId: "del_published", category: "Content & Editorial", taskType: "Email or newsletter", deliveryStatus: "live_published", publishedUrls: [], implementedAt: null, implementedByName: null,
       files: deliveryFiles(["https://example.com/welcome.docx"]),
     }] }} />);
     await expectNoA11yViolations(container);

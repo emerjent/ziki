@@ -103,8 +103,8 @@ describe("shared issue workspace switch", () => {
 
 describe("Library approved deliverables", () => {
   const items: LibraryItem[] = [
-    { id: "launch", number: 42, title: "Launch campaign", summary: "Approved campaign", agent: "Studio", publishedAt: "2026-11-04T12:00:00Z", files: deliveryFiles(["https://example.com/social.png", "https://example.com/guide.docx"]) },
-    { id: "article", number: 38, title: "Agent workflow", summary: "A workflow guide", agent: "Writer", publishedAt: "2026-11-02T12:00:00Z", files: deliveryFiles(["https://example.com/blog/workflow"]) },
+    { id: "launch", number: 42, title: "Launch campaign", summary: "Approved campaign", agent: "Studio", publishedAt: "2026-11-04T12:00:00Z", deliveryId: "del_launch", category: "Brand & Identity", taskType: "Graphic", deliveryStatus: "live_published", publishedUrls: [], implementedAt: null, implementedByName: null, files: deliveryFiles(["https://example.com/social.png", "https://example.com/guide.docx"]) },
+    { id: "article", number: 38, title: "Agent workflow", summary: "A workflow guide", agent: "Writer", publishedAt: "2026-11-02T12:00:00Z", deliveryId: "del_article", category: "Content & Editorial", taskType: "Blog post", deliveryStatus: "live_published", publishedUrls: [], implementedAt: null, implementedByName: null, files: deliveryFiles(["https://example.com/blog/workflow"]) },
   ];
   beforeEach(() => {
     window.history.replaceState(null, "", "/demo/marketing/library");

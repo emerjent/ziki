@@ -36,11 +36,12 @@ const db = vi.hoisted(() => ({
   webhookSubscription: { findMany: vi.fn() },
   webhookDelivery: { createMany: vi.fn() },
   issueClaim: { updateMany: vi.fn(), update: vi.fn() },
-  delivery: { findMany: vi.fn(), findFirst: vi.fn() },
+  delivery: { findMany: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
   projectWorkflow: { findUnique: vi.fn() },
   project: { findFirst: vi.fn() },
   agentMistake: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), findMany: vi.fn() },
   supportThread: { findMany: vi.fn(async () => []), updateMany: vi.fn() },
+  membership: { findFirst: vi.fn(async () => ({ id: "mem1" })), findUnique: vi.fn(async () => ({ id: "mem1" })) },
   notification: { createMany: vi.fn() },
   $queryRaw: vi.fn(),
   $transaction: vi.fn(),
@@ -517,6 +518,194 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
         }),
       }),
     }));
+  });
+
+  it("transitions delivery status to live_published when manager confirms publication", async () => {
+    marketingReady();
+    db.delivery.findFirst.mockResolvedValue({
+      id: "del_1",
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+      publishedUrls: ["https://example.com/blog/article"],
+      deliveryStatus: "publication_pending",
+    });
+
+    await acceptFix(merger("m1", "mo", "manager"), "bug1", {
+      confirmPublication: true,
+      manualOverrideReason: "Manually verified live on external site",
+    });
+
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_1" },
+        data: expect.objectContaining({
+          deliveryStatus: "live_published",
+          verifiedByManagerId: "mo",
+          manualOverrideReason: expect.stringContaining("Manually verified live on external site"),
+        }),
+      }),
+    );
+  });
+
+  it("attributes publication confirmation to the explicit authenticated manager user ID", async () => {
+    marketingReady();
+    db.delivery.findFirst.mockResolvedValue({
+      id: "del_1",
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+      publishedUrls: ["https://example.com/blog/article"],
+      deliveryStatus: "publication_pending",
+    });
+
+    await acceptFix(merger("m1", "agent_owner_id", "manager"), "bug1", {
+      onBehalfOfUserId: "authenticated_human_manager",
+      confirmPublication: true,
+      manualOverrideReason: "Confirmed live on partner site by marketing lead",
+    });
+
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_1" },
+        data: expect.objectContaining({
+          deliveryStatus: "live_published",
+          verifiedByManagerId: "authenticated_human_manager",
+        }),
+      }),
+    );
+
+    expect(db.mergeReview.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          onBehalfOfUserId: "authenticated_human_manager",
+        }),
+      }),
+    );
+  });
+
+  it("rejects publication confirmation if the agent holding the claim attempts to accept its own work", async () => {
+    marketingReady();
+    // Solver agent holding active claim is 'solver-agent' (see bugRow claims)
+    const result = await acceptFix(merger("solver-agent", "agent_owner_id", "manager"), "bug1", {
+      confirmPublication: true,
+    });
+
+    expect(result).toMatchObject({
+      status: 403,
+      error: "not_independent",
+    });
+    expect(db.delivery.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects publication confirmation if the manager does not belong to the organisation", async () => {
+    marketingReady();
+    db.membership.findFirst.mockResolvedValueOnce(null as any);
+
+    const result = await acceptFix(merger("m1", "agent_owner_id", "manager"), "bug1", {
+      onBehalfOfUserId: "external_attacker_user",
+      confirmPublication: true,
+    });
+
+    expect(result).toMatchObject({
+      status: 403,
+      error: "not_independent",
+    });
+    expect(db.delivery.update).not.toHaveBeenCalled();
+  });
+
+  it("enforces per-URL publication policy on delivery with 3 URLs (reachable, unreachable, prohibited IP)", async () => {
+    marketingReady();
+    const urls = [
+      "https://example.com/reachable",
+      "https://example.com/unreachable-404",
+      "http://169.254.169.254/latest/meta-data",
+    ];
+    const automatedResults = [
+      { url: urls[0], ok: true, status: 200 },
+      { url: urls[1], ok: false, status: 404, error: "HTTP 404 Not Found" },
+      { url: urls[2], ok: false, status: null, error: "Forbidden destination IP address: 169.254.169.254" },
+    ];
+
+    db.delivery.findFirst.mockResolvedValue({
+      id: "del_multi_url",
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+      publishedUrls: urls,
+      deliveryStatus: "publication_pending",
+      verificationEvidence: {
+        results: automatedResults,
+        checkedAt: new Date().toISOString(),
+      },
+    });
+
+    // 1. Manager attempts to confirm without manual overrides -> policy MUST FAIL and stay ready_to_use
+    await acceptFix(merger("m1", "mo", "manager"), "bug1", {
+      confirmPublication: true,
+    });
+
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_multi_url" },
+        data: expect.objectContaining({
+          deliveryStatus: "ready_to_use",
+          verifiedPublishedAt: null,
+          verifiedByManagerId: null,
+          verificationEvidence: expect.objectContaining({
+            policyPassed: false,
+            // Verify automated results are strictly preserved and NOT erased
+            results: automatedResults,
+          }),
+        }),
+      }),
+    );
+
+    // 2. Manager provides explicit per-URL overrides for the failed URLs -> policy PASSES
+    await acceptFix(merger("m1", "mo", "manager"), "bug1", {
+      confirmPublication: true,
+      manualOverrides: [
+        { url: urls[1], reason: "404 is behind authenticated corporate intranet" },
+        { url: urls[2], reason: "Internal endpoint verified on VPN by DevOps team" },
+      ],
+    });
+
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_multi_url" },
+        data: expect.objectContaining({
+          deliveryStatus: "live_published",
+          verifiedByManagerId: "mo",
+          verificationEvidence: expect.objectContaining({
+            policyPassed: true,
+            results: automatedResults, // Automated probe results strictly preserved!
+            overrides: [
+              { url: urls[1], reason: "404 is behind authenticated corporate intranet" },
+              { url: urls[2], reason: "Internal endpoint verified on VPN by DevOps team" },
+            ],
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("transitions delivery status to ready_to_use when manager declines publication confirmation", async () => {
+    marketingReady();
+    db.delivery.findFirst.mockResolvedValue({
+      id: "del_1",
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+      publishedUrls: ["https://example.com/broken"],
+      deliveryStatus: "publication_pending",
+    });
+
+    await acceptFix(merger("m1", "mo", "manager"), "bug1", {
+      confirmPublication: false,
+    });
+
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_1" },
+        data: expect.objectContaining({
+          deliveryStatus: "ready_to_use",
+          verifiedPublishedAt: null,
+          verifiedByManagerId: null,
+        }),
+      }),
+    );
   });
 
   it("refuses marketing work its reviewers haven't approved", async () => {

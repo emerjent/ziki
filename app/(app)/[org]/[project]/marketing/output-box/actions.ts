@@ -1,18 +1,205 @@
 "use server";
 
-import { requireProject } from "@/lib/project-route";
+import { requireProject, type ProjectContext } from "@/lib/project-route";
 import type { ProjectRef } from "@/lib/project-paths";
-import type { LibraryResult } from "@/components/marketing/library/model";
+import type { LibraryResult, LibraryDeliveryStatus } from "@/components/marketing/library/model";
 import { readLibrary } from "./data";
+import { prisma } from "@/lib/prisma";
+import { verifyPublishedUrls } from "@/lib/marketing/verify-url";
+import { Prisma } from "@prisma/client";
+
+function canReadProjectDeliveries(context: ProjectContext): boolean {
+  if (context.user.role === "super_admin" || context.isOrgAdmin) return true;
+  if (context.isProjectMember) return true;
+  if (context.project.visibility === "public") return true;
+  return false;
+}
+
+function canModifyProjectDeliveries(context: ProjectContext): boolean {
+  if (context.user.role === "super_admin" || context.isOrgAdmin) return true;
+  if (context.isProjectMember) return true;
+  if (context.project.visibility === "public" && context.isOrgMember) return true;
+  return false;
+}
 
 export async function refreshLibrary(slug: ProjectRef): Promise<LibraryResult> {
   // Access failures must remain redirects/404s, never be disguised as an empty collection.
   const [org, project] = slug.split("/");
   const context = await requireProject(org, project);
+  if (!canReadProjectDeliveries(context)) {
+    return { ok: false };
+  }
   try {
     return { ok: true, items: await readLibrary(context) };
   } catch (error) {
     console.error("[library] Failed to read published marketing deliveries", error);
     return { ok: false };
   }
+}
+
+export type ToggleImplementationResult =
+  | {
+      ok: true;
+      deliveryStatus: LibraryDeliveryStatus;
+      implementedAt: string | null;
+      implementedByName: string | null;
+    }
+  | { ok: false; error: string };
+
+export async function toggleDeliveryImplementedAction(
+  slug: ProjectRef,
+  deliveryId: string,
+  implemented: boolean,
+): Promise<ToggleImplementationResult> {
+  const [org, project] = slug.split("/");
+  const context = await requireProject(org, project);
+
+  if (!canModifyProjectDeliveries(context)) {
+    return { ok: false, error: "Only project members or organisation administrators can update implementation status in a private project." };
+  }
+
+  try {
+    const updated = await prisma.$transaction(async (tx) => {
+      // Row lock on Delivery
+      await tx.$queryRaw`SELECT "id" FROM "Delivery" WHERE "id" = ${deliveryId} FOR UPDATE`;
+
+      const delivery = await tx.delivery.findUnique({
+        where: { id: deliveryId },
+        include: {
+          bug: {
+            select: { id: true, projectId: true, organisationId: true, track: true },
+          },
+        },
+      });
+
+      if (!delivery || delivery.bug.projectId !== context.project.id || delivery.bug.organisationId !== context.organisationId) {
+        throw new Error("Delivery not found in this project.");
+      }
+
+      if (delivery.bug.track !== "marketing") {
+        throw new Error("Implementation tracking is only supported for marketing deliveries.");
+      }
+
+      if (implemented) {
+        const previousStatus = delivery.deliveryStatus === "implemented" ? delivery.previousStatus : delivery.deliveryStatus;
+        const now = new Date();
+        const res = await tx.delivery.update({
+          where: { id: deliveryId },
+          data: {
+            deliveryStatus: "implemented",
+            previousStatus: previousStatus ?? "ready_to_use",
+            implementedAt: now,
+            implementedById: context.user.id,
+          },
+          select: {
+            id: true,
+            deliveryStatus: true,
+            implementedAt: true,
+          },
+        });
+
+        await tx.bugActivity.create({
+          data: {
+            bugId: delivery.bug.id,
+            actorId: context.user.id,
+            type: "status_changed",
+            summary: `Marketing deliverable marked as implemented by ${context.user.name || context.user.email || "team member"}`,
+            metadata: {
+              field: "deliveryStatus",
+              from: delivery.deliveryStatus,
+              to: "implemented",
+              deliveryId: delivery.id,
+            },
+          },
+        });
+
+        return {
+          deliveryStatus: res.deliveryStatus as LibraryDeliveryStatus,
+          implementedAt: res.implementedAt?.toISOString() ?? null,
+          implementedByName: context.user.name || context.user.email || "Team member",
+        };
+      } else {
+        const restoredStatus = delivery.previousStatus ?? "ready_to_use";
+        const res = await tx.delivery.update({
+          where: { id: deliveryId },
+          data: {
+            deliveryStatus: restoredStatus,
+            previousStatus: null,
+            implementedAt: null,
+            implementedById: null,
+          },
+          select: {
+            id: true,
+            deliveryStatus: true,
+          },
+        });
+
+        await tx.bugActivity.create({
+          data: {
+            bugId: delivery.bug.id,
+            actorId: context.user.id,
+            type: "status_changed",
+            summary: `Marketing deliverable implementation status reverted by ${context.user.name || context.user.email || "team member"}`,
+            metadata: {
+              field: "deliveryStatus",
+              from: "implemented",
+              to: restoredStatus,
+              deliveryId: delivery.id,
+            },
+          },
+        });
+
+        return {
+          deliveryStatus: res.deliveryStatus as LibraryDeliveryStatus,
+          implementedAt: null,
+          implementedByName: null,
+        };
+      }
+    });
+
+    return { ok: true, ...updated };
+  } catch (err) {
+    console.error("[library] toggleDeliveryImplementedAction error:", err);
+    return { ok: false, error: err instanceof Error ? err.message : "Failed to update implementation status." };
+  }
+}
+
+export async function retryUrlVerificationAction(
+  slug: ProjectRef,
+  deliveryId: string,
+): Promise<{ ok: boolean; evidence?: unknown; error?: string }> {
+  const [org, project] = slug.split("/");
+  const context = await requireProject(org, project);
+
+  if (!canModifyProjectDeliveries(context)) {
+    return { ok: false, error: "Only project members or organisation administrators can reverify URLs in a private project." };
+  }
+
+  const delivery = await prisma.delivery.findUnique({
+    where: { id: deliveryId },
+    select: {
+      id: true,
+      publishedUrls: true,
+      bug: { select: { projectId: true, organisationId: true } },
+    },
+  });
+
+  if (!delivery || delivery.bug.projectId !== context.project.id || delivery.bug.organisationId !== context.organisationId) {
+    return { ok: false, error: "Delivery not found." };
+  }
+
+  if (!delivery.publishedUrls || delivery.publishedUrls.length === 0) {
+    return { ok: false, error: "No published URLs associated with this deliverable." };
+  }
+
+  const batchResult = await verifyPublishedUrls(delivery.publishedUrls);
+
+  await prisma.delivery.update({
+    where: { id: deliveryId },
+    data: {
+      verificationEvidence: batchResult as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  return { ok: true, evidence: batchResult };
 }
