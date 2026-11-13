@@ -3,10 +3,10 @@ import { MergerTransparencyCard } from "@/components/merger-transparency-card";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** The issue page's stage panels: bids with their votes and the Award control only where it may be used, confirmations and their banner, and judgements and merge reviews with their replies. */
-const mocks = vi.hoisted(() => ({ addComment: vi.fn(), editPullRequestUrl: vi.fn(), switchWorkspace: vi.fn(), takeItBack: vi.fn() }));
+const mocks = vi.hoisted(() => ({ addComment: vi.fn(), requestRetest: vi.fn(), editPullRequestUrl: vi.fn(), switchWorkspace: vi.fn(), takeItBack: vi.fn() }));
 vi.mock("@/app/(app)/organisations/issue-switch-action", () => ({ switchIssueWorkspaceAction: mocks.switchWorkspace }));
 vi.mock("@/app/actions/take-it-back", () => ({ takeItBackAction: mocks.takeItBack }));
 const libraryRefresh = vi.hoisted(() => vi.fn());
@@ -19,6 +19,7 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("@/app/actions/issues", () => ({
   addCommentAction: mocks.addComment,
+  requestRetestAction: mocks.requestRetest,
   editPullRequestUrlAction: mocks.editPullRequestUrl,
 }));
 vi.mock("@/app/actions/issue-bids", () => ({ awardIssueBidAction: vi.fn() }));
@@ -31,6 +32,7 @@ import { MergeReviewsPanel, TestVerdictsPanel, type MergeReviewView, type TestVe
 import { IssueBidsPanel, type BidEntryView } from "@/components/issue-bids";
 import type { BidderRecordView } from "@/lib/bidder-record";
 import { IssueConfirmationsPanel, type ConfirmationEntryView, type ConfirmationsData } from "@/components/issue-confirmations";
+import { RetestRequest } from "@/components/retest-request";
 import { TakeItBackPanel } from "@/components/take-it-back";
 import { takeItBackReasonError, takeItBackState, type TakeItBackView } from "@/lib/take-it-back";
 import { IssueOrganisationSwitch } from "@/components/issue-organisation-hint";
@@ -129,21 +131,21 @@ describe("Library approved deliverables", () => {
 
   it("switches attachments and updates actions without changing the associated task", async () => {
     const user = userEvent.setup();
-    const view = render(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    const view = render(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     await user.click(screen.getByRole("button", { name: "guide.docx" }));
-    view.rerender(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    view.rerender(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     expect(screen.getByRole("link", { name: /Open original/ })).toHaveAttribute("href", "https://example.com/guide.docx");
     expect(screen.getByRole("link", { name: /View task #42/ })).toHaveAttribute("href", "/acme/demo/42");
     expect(screen.getByRole("button", { name: /Download/ })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: /Agent workflow.*Task #38/ }));
-    view.rerender(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    view.rerender(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     expect(screen.getByRole("link", { name: /Open original/ })).toHaveAttribute("href", "https://example.com/blog/workflow");
     expect(screen.queryByRole("button", { name: /Download/ })).not.toBeInTheDocument();
   });
 
   it("keeps everything typed in search while the URL catches up", async () => {
     const user = userEvent.setup();
-    render(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    render(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     const search = screen.getByRole("searchbox", { name: "Search approved work" });
     await user.type(search, "workflow");
     expect(search).toHaveValue("workflow");
@@ -153,7 +155,7 @@ describe("Library approved deliverables", () => {
 
   it("retries only a failed preview and keeps task access available", async () => {
     const user = userEvent.setup();
-    render(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    render(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     fireEvent.error(screen.getByRole("img", { name: /Launch campaign/ }));
     await user.click(screen.getByRole("button", { name: "Retry preview" }));
     expect(screen.getByRole("img", { name: /Launch campaign/ })).toBeInTheDocument();
@@ -164,13 +166,13 @@ describe("Library approved deliverables", () => {
   it("retains results on refresh failure and recovers from an initial collection error", async () => {
     const user = userEvent.setup();
     libraryRefresh.mockResolvedValue({ ok: false });
-    const view = render(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    const view = render(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     await user.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/previous results/);
     expect(screen.getByRole("link", { name: /View task #42/ })).toBeInTheDocument();
     view.unmount();
     libraryRefresh.mockResolvedValue({ ok: true, items });
-    render(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: false }} />);
+    render(<Library slug={projectRef("acme", "demo")} initial={{ ok: false }} />);
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("link", { name: /View task #42/ })).toBeInTheDocument();
   });
@@ -180,13 +182,13 @@ describe("Library approved deliverables", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
     const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
     const user = userEvent.setup();
-    const view = render(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    const view = render(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     await user.click(screen.getByRole("button", { name: /Launch campaign.*Task #42/ }));
-    view.rerender(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    view.rerender(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     expect(new URLSearchParams(window.location.search).get("view")).toBe("detail");
     expect(screen.getByRole("heading", { name: "Launch campaign" })).toHaveFocus();
     await user.click(screen.getByRole("button", { name: /Back to Library/ }));
-    view.rerender(<Library slug={projectRef("acme", "demo")} projectName="Demo" initial={{ ok: true, items }} />);
+    view.rerender(<Library slug={projectRef("acme", "demo")} initial={{ ok: true, items }} />);
     expect(new URLSearchParams(window.location.search).get("q")).toBe("Studio");
     expect(new URLSearchParams(window.location.search).get("item")).toBe("launch");
     expect(new URLSearchParams(window.location.search).has("view")).toBe(false);
@@ -243,6 +245,54 @@ describe("MergeReviewsPanel (#review-entries)", () => {
     await user.click(screen.getAllByRole("button", { name: "Reply" }).at(-1)!);
     await waitFor(() => expect(mocks.addComment).toHaveBeenCalledTimes(1));
     expect((mocks.addComment.mock.calls[0][1] as FormData).get("mergeReviewId")).toBe("mr1");
+  });
+});
+
+describe("RetestRequest", () => {
+  beforeAll(() => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value(this: HTMLDialogElement) { this.open = true; },
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value(this: HTMLDialogElement) { this.open = false; this.dispatchEvent(new Event("close")); },
+    });
+  });
+
+  it("submits current details with an unknown version and links to the saved request", async () => {
+    mocks.requestRetest.mockResolvedValue({ ok: true, commentId: "comment123" });
+    const user = userEvent.setup();
+    render(<RetestRequest bugId="bug1" issueHref="/acme/project/12" issueLabel="#12 · Save still fails" />);
+    await user.click(screen.getByRole("button", { name: "Still having this problem?" }));
+    await user.selectOptions(screen.getByLabelText("Operating system"), "Not sure");
+    await user.type(screen.getByLabelText("Describe what happens now"), "The save button still does nothing after I restart.");
+    await user.click(screen.getByRole("button", { name: "Request a retest" }));
+
+    await waitFor(() => expect(mocks.requestRetest).toHaveBeenCalledTimes(1));
+    const [bugId, data] = mocks.requestRetest.mock.calls[0] as [string, FormData];
+    expect(bugId).toBe("bug1");
+    expect(data.get("operatingSystem")).toBe("Not sure");
+    expect(data.get("installedVersion")).toBe("");
+    expect(data.get("currentBehavior")).toBe("The save button still does nothing after I restart.");
+    expect(await screen.findByRole("status")).toHaveTextContent("Retest requested");
+    expect(screen.getByRole("link", { name: "View request" })).toHaveAttribute("href", "/acme/project/12#comment-comment123");
+    expect(screen.getByText(/won't reopen the issue/)).toBeInTheDocument();
+  });
+
+  it("keeps entered details and reports a save failure without showing success", async () => {
+    mocks.requestRetest.mockResolvedValue({ error: "Issue not found" });
+    const user = userEvent.setup();
+    render(<RetestRequest bugId="bug1" issueHref="/acme/project/12" issueLabel="#12 · Save still fails" />);
+    await user.click(screen.getByRole("button", { name: "Still having this problem?" }));
+    await user.selectOptions(screen.getByLabelText("Operating system"), "Windows");
+    const details = screen.getByLabelText("Describe what happens now") as HTMLTextAreaElement;
+    await user.type(details, "The save button still does nothing after I restart.");
+    await user.click(screen.getByRole("button", { name: "Request a retest" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Issue not found");
+    expect(details).toHaveValue("The save button still does nothing after I restart.");
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });
 

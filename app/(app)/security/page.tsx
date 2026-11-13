@@ -1,15 +1,38 @@
 import Link from "next/link";
+import { auth } from "@/auth";
+import { SecurityPublicPage, securityPublicMetadata } from "@/components/security-checks/security-public-page";
+import { redirect } from "next/navigation";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { requireUser } from "@/lib/auth-helpers";
 import { currentOrganisationAccess } from "@/lib/organisation-access";
 import { prisma } from "@/lib/prisma";
 import { loadSecurityDashboard, type DashboardFinding } from "@/lib/security-dashboard";
-import { SECURITY_SEVERITIES, SEVERITY_GUIDE } from "@/lib/security-severity";
+import { isSecuritySeverity, SECURITY_SEVERITIES, SEVERITY_GUIDE, SEVERITY_LABEL } from "@/lib/security-severity";
 import { newIssuePath, type ProjectRef } from "@/lib/project-paths";
 import { SeverityChip } from "@/components/security-finding-panel";
 import { AgentClearanceToggle } from "@/components/security-finding-controls";
+import { PipelineSteps } from "@/components/pipeline-steps";
+import { SecuritySettingsLink } from "@/components/security/security-settings-link";
+import {
+  filterSecurityFindingsByStage,
+  parseSecurityStageFilter,
+  SecurityStageFilterBar,
+  type SecurityStageFilter,
+} from "@/components/security-stage-filter";
 import { LocalTime } from "@/components/local-time";
+import { SecurityChecksPanel } from "@/components/security-checks/entry-panel";
+import { SecurityTabs } from "@/components/security-checks/security-tabs";
+import { listWorkspaceChecks, parseSiteFilter } from "@/lib/security-checks/entry";
+import { countAgentJobs } from "@/lib/security-checks/your-work";
+import { OrgPageHeader, ReadOnlyNote, orgCard, orgListCard } from "../[org]/[project]/org/org-ui";
 
-export const metadata = { title: "Security" };
+/** Signed out, /security is the public Ziki Security page, so it carries that page's search title and description. */
+export async function generateMetadata() {
+  const session = await auth();
+  return session?.user ? { title: "Security" } : securityPublicMetadata;
+}
 
 /**
  * The Security area (#security-findings): report a vulnerability privately,
@@ -17,19 +40,75 @@ export const metadata = { title: "Security" };
  * the ones already disclosed. Owners and admins also choose which agents may
  * read private findings.
  */
-export default async function SecurityPage() {
+type SearchParams = Promise<{
+  severity?: string | string[];
+  stage?: string | string[];
+  q?: string | string[];
+  project?: string | string[];
+  assignee?: string | string[];
+  reporter?: string | string[];
+  check?: string | string[];
+  unlocked?: string | string[];
+  added?: string | string[];
+  view?: string | string[];
+  show?: string | string[];
+}>;
+
+const FINDINGS_PATH = "/security?view=findings";
+const FINDINGS_FILTERS = ["severity", "stage", "q", "project", "assignee", "reporter"] as const;
+
+export default async function SecurityPage(props: {
+  searchParams?: SearchParams;
+}) {
+  // Signed out: the public Ziki Security page (#security-checks, C2).
+  const session = await auth();
+  if (!session?.user) return <SecurityPublicPage signedIn={false} />;
+  const params = (await props.searchParams) ?? {};
+  const severity = typeof params.severity === "string" ? params.severity.toLowerCase() : "";
+  const selectedSeverity = isSecuritySeverity(severity) ? severity : "all";
+  const selectedStage = parseSecurityStageFilter(params.stage);
+  const search = {
+    q: typeof params.q === "string" ? params.q.trim().slice(0, 200) : "",
+    project: typeof params.project === "string" ? params.project : "",
+    assignee: typeof params.assignee === "string" ? params.assignee.trim().slice(0, 200) : "",
+    reporter: params.reporter === "person" || params.reporter === "agent" ? params.reporter : "",
+  };
+  const searchQuery = new URLSearchParams(Object.entries(search).filter(([, value]) => value));
   const user = await requireUser();
   const access = await currentOrganisationAccess(user.id, user.role);
   if (!access.organisationId) {
     return (
-      <section className="mx-auto max-w-xl rounded-[24px] border border-zk-border bg-zk-surface p-8 text-center">
-        <h1 className="text-[28px] font-extrabold text-zk-text">Security</h1>
-        <p className="mt-2 text-sm text-zk-text2">Join or create a workspace to report and track security findings.</p>
-      </section>
+      <div className="space-y-4">
+        <OrgPageHeader heading="h1" title="Security" actions={
+          <div className="flex items-center gap-2">
+            <Link href="/security/activity" className="text-sm font-semibold text-zk-accent hover:underline">Activity</Link>
+            <SecuritySettingsLink />
+          </div>
+        }>Report and track security findings.</OrgPageHeader>
+        <ReadOnlyNote>Join or create a workspace to report and track security findings.</ReadOnlyNote>
+        <SecurityStageFilterBar findings={[]} selected={selectedStage} severity={selectedSeverity} />
+      </div>
     );
   }
   const organisationId = access.organisationId;
-  const dashboard = await loadSecurityDashboard(organisationId, { kind: "person", userId: user.id, organisationId, organisationAdmin: access.admin });
+  // The page opens on the one box (#security-checks). The findings dashboard is
+  // one link away, and any old link that carries a findings filter still lands on it.
+  const showFindings = params.view === "findings" || FINDINGS_FILTERS.some((key) => params[key] !== undefined);
+  if (!showFindings) {
+    // Only owners and admins own the assets and add checks; everyone else just sees their own work.
+    if (!access.admin) redirect("/security/work");
+    const [checks, jobs] = await Promise.all([listWorkspaceChecks(organisationId, user.id), countAgentJobs(user.id)]);
+    const highlight = typeof params.check === "string" ? { checkId: params.check, unlocked: Number(params.unlocked) > 0 ? Number(params.unlocked) : 0, added: params.added === "1" } : undefined;
+    // Assets and Your work are always there. With nothing added yet, Assets holds the box and the three steps.
+    return (
+      <div className="flex w-full flex-col pb-10">
+        <h1 className="sr-only">Security</h1>
+        <SecurityTabs selected="checks" checks={checks.length} jobs={jobs} />
+        <SecurityChecksPanel checks={checks} highlight={highlight} show={parseSiteFilter(params.show)} />
+      </div>
+    );
+  }
+  const dashboard = await loadSecurityDashboard(organisationId, { kind: "person", userId: user.id, organisationId, organisationAdmin: access.admin }, undefined, search);
   const agents = access.admin
     ? (
         await prisma.agentActivation.findMany({
@@ -40,61 +119,128 @@ export default async function SecurityPage() {
         })
       ).map(({ agent, level, securityCleared }) => ({ ...agent, level, securityCleared }))
     : [];
+  const filteredOpen = selectedSeverity === "all"
+    ? dashboard.open
+    : dashboard.open.filter((f) => f.severity === selectedSeverity);
+
+  const filteredDisclosed = selectedSeverity === "all"
+    ? dashboard.disclosed
+    : dashboard.disclosed.filter((f) => f.severity === selectedSeverity);
+
+  const visibleOpen = filterSecurityFindingsByStage(filteredOpen, selectedStage);
+  const findings = [...dashboard.open, ...dashboard.disclosed];
+  const severitySteps = (["all", ...SECURITY_SEVERITIES] as const).map((level) => ({
+    label: level === "all" ? "All" : SEVERITY_LABEL[level],
+    count: level === "all" ? findings.length : findings.filter((finding) => finding.severity === level).length,
+    href: securityFilterHref(level, selectedStage, searchQuery),
+    selected: selectedSeverity === level,
+  }));
   const openCount = dashboard.open.length;
   const severe = dashboard.openBySeverity.critical + dashboard.openBySeverity.high;
 
   return (
-    <div className="security-page mx-auto flex w-full max-w-5xl flex-col gap-6 pb-10">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0 space-y-1.5">
-          <h1 className="text-[28px] font-extrabold tracking-[-0.02em] text-zk-text">Security</h1>
-          <p className="max-w-2xl text-sm text-zk-text2">
-            Report vulnerabilities privately. A finding&apos;s details stay with the reporter, this workspace&apos;s owners and
-            admins, and agents cleared for security work until the fix is live. Then they are published for everyone.
-          </p>
+    <div className="flex w-full flex-col gap-4 pb-10 sm:gap-6">
+      <nav aria-label="Breadcrumb" className="text-sm text-zk-muted">
+        <Link href="/security" className="font-semibold text-zk-accent hover:underline">Security</Link>
+        <span aria-hidden="true"> / </span>Findings
+      </nav>
+      <OrgPageHeader heading="h1" title="Findings" actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/security/activity" className="text-sm font-semibold text-zk-accent hover:underline">Activity</Link>
+          <SecuritySettingsLink />
+          <ReportButton projects={dashboard.projects} />
         </div>
-        <ReportButton projects={dashboard.projects} />
-      </header>
+      }>
+        Report vulnerabilities privately. A workspace owner or admin decides when to publish them.
+      </OrgPageHeader>
 
-      <section aria-label="Summary" className="security-stats grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="Open findings" value={String(openCount)} hint={openCount ? "Private until fixed" : "Nothing open"} />
+      <form action="/security" className="grid gap-3 rounded-[20px] border border-zk-border bg-zk-surface p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <input type="hidden" name="view" value="findings" />
+        {selectedSeverity !== "all" ? <input type="hidden" name="severity" value={selectedSeverity} /> : null}
+        {selectedStage !== "all" ? <input type="hidden" name="stage" value={selectedStage} /> : null}
+        <label htmlFor="security-q" className="space-y-1 text-sm text-zk-text2">Finding title or ID<Input id="security-q" name="q" defaultValue={search.q} maxLength={200} /></label>
+        <label htmlFor="security-project" className="space-y-1 text-sm text-zk-text2">Project
+          <Select id="security-project" name="project" defaultValue={search.project}>
+            <option value="">All projects</option>
+            {dashboard.projects.map((project) => <option key={project.ref} value={project.ref.split("/").at(-1)}>{project.name}</option>)}
+          </Select>
+        </label>
+        <label htmlFor="security-assignee" className="space-y-1 text-sm text-zk-text2">Assignee<Input id="security-assignee" name="assignee" defaultValue={search.assignee} placeholder="Name or unassigned" maxLength={200} /></label>
+        <label htmlFor="security-reporter" className="space-y-1 text-sm text-zk-text2">Reporter
+          <Select id="security-reporter" name="reporter" defaultValue={search.reporter}>
+            <option value="">Everyone</option>
+            <option value="person">Person</option>
+            <option value="agent">Agent</option>
+          </Select>
+        </label>
+        <div className="flex items-center gap-3 sm:col-span-2">
+          <Button type="submit">Apply filters</Button>
+          {searchQuery.size ? <Link href={securityFilterHref(selectedSeverity, selectedStage)} className="text-sm font-semibold text-zk-accent hover:underline">Clear search filters</Link> : null}
+        </div>
+      </form>
+      <section aria-label="Summary" className={`${orgListCard} grid grid-cols-2 sm:grid-cols-4`}>
+        <Stat label="Open findings" value={String(openCount)} hint={openCount ? "Private until published" : "Nothing open"} />
         <Stat
           label="Critical and high"
           value={String(severe)}
           hint={`${dashboard.openBySeverity.critical} critical, ${dashboard.openBySeverity.high} high`}
           alert={severe > 0}
         />
-        <Stat label="Fixed and disclosed" value={String(dashboard.disclosed.length)} hint="Details now public" />
+        <Stat label="Disclosed" value={String(dashboard.disclosed.length)} hint="Details now public" />
         <Stat
-          label="Median time to fix"
-          value={dashboard.medianDaysToFix === null ? "–" : `${dashboard.medianDaysToFix} d`}
-          hint="From report to live fix"
+          label="Median time to disclose"
+          value={dashboard.medianDaysToDisclosure === null ? "–" : `${dashboard.medianDaysToDisclosure} d`}
+          hint="From report to publication"
         />
       </section>
 
-      <section aria-labelledby="open-heading" className="rounded-[20px] border border-zk-border bg-zk-surface p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="open-heading" className="text-lg font-bold text-zk-text">Open findings</h2>
-          <p className="text-xs text-zk-muted">Worst first, then oldest.</p>
+      <div className="flex justify-center">
+        <PipelineSteps stages={severitySteps} label="Filter findings by severity" />
+      </div>
+
+      <section aria-labelledby="open-heading" className={orgCard}>
+        <h2 id="open-heading" className="text-base font-semibold text-zk-text">Open findings</h2>
+        <p className="text-xs text-zk-muted">Worst first, then oldest.</p>
+        <div className="mt-3">
+          <SecurityStageFilterBar findings={dashboard.open} selected={selectedStage} severity={selectedSeverity} search={searchQuery} />
         </div>
-        {dashboard.open.length ? (
-          <FindingTable findings={dashboard.open} kind="open" />
-        ) : (
+        {selectedStage !== "all" || selectedSeverity !== "all" ? (
+          <p className="mt-3 text-sm text-zk-text2">
+            Showing {visibleOpen.length} of {openCount} open {openCount === 1 ? "finding" : "findings"}
+          </p>
+        ) : null}
+        {visibleOpen.length ? (
+          <FindingTable findings={visibleOpen} kind="open" filterHref={securityFilterHref(selectedSeverity, selectedStage, searchQuery)} />
+        ) : selectedStage === "all" && selectedSeverity === "all" && !searchQuery.size ? (
           <p className="mt-3 text-sm text-zk-text2">No open security findings. Found something? Report it privately.</p>
-        )}
-      </section>
-
-      <section aria-labelledby="disclosed-heading" className="rounded-[20px] border border-zk-border bg-zk-surface p-5">
-        <h2 id="disclosed-heading" className="text-lg font-bold text-zk-text">Disclosed</h2>
-        {dashboard.disclosed.length ? (
-          <FindingTable findings={dashboard.disclosed} kind="disclosed" />
+        ) : selectedSeverity === "all" && !searchQuery.size ? (
+          <p className="mt-3 text-sm text-zk-text2">
+            No open findings in this stage yet.{" "}
+            <Link href={FINDINGS_PATH} className="font-semibold text-zk-accent hover:underline">
+              Show all
+            </Link>
+          </p>
         ) : (
-          <p className="mt-3 text-sm text-zk-text2">Findings appear here once their fix is live and their details are published.</p>
+          <p className="mt-3 text-sm text-zk-text2">
+            No open findings match these filters.{" "}
+            <Link href={FINDINGS_PATH} className="font-semibold text-zk-accent hover:underline">
+              Show all
+            </Link>
+          </p>
         )}
       </section>
 
-      <section aria-labelledby="severity-heading" className="rounded-[20px] border border-zk-border bg-zk-surface p-5">
-        <h2 id="severity-heading" className="text-lg font-bold text-zk-text">How to rate severity</h2>
+      <section aria-labelledby="disclosed-heading" className={orgCard}>
+        <h2 id="disclosed-heading" className="text-base font-semibold text-zk-text">Disclosed</h2>
+        {filteredDisclosed.length ? (
+          <FindingTable findings={filteredDisclosed} kind="disclosed" filterHref={securityFilterHref(selectedSeverity, selectedStage, searchQuery)} />
+        ) : (
+          <p className="mt-3 text-sm text-zk-text2">Findings appear here after a workspace owner or admin publishes them.</p>
+        )}
+      </section>
+
+      <section aria-labelledby="severity-heading" className={orgCard}>
+        <h2 id="severity-heading" className="text-base font-semibold text-zk-text">How to rate severity</h2>
         <dl className="mt-3 grid gap-3 sm:grid-cols-2">
           {SECURITY_SEVERITIES.map((level) => (
             <div key={level} className="space-y-1">
@@ -106,8 +252,8 @@ export default async function SecurityPage() {
       </section>
 
       {access.admin ? (
-        <section aria-labelledby="agents-heading" className="rounded-[20px] border border-zk-border bg-zk-surface p-5">
-          <h2 id="agents-heading" className="text-lg font-bold text-zk-text">Agents cleared for security work</h2>
+        <section aria-labelledby="agents-heading" className={orgCard}>
+          <h2 id="agents-heading" className="text-base font-semibold text-zk-text">Agents cleared for security work</h2>
           <p className="mt-1 text-sm text-zk-text2">
             A cleared agent can read every private finding in this workspace, through the API and its files, so it can
             confirm, fix and test them. Only owners and admins see this list. An agent can always read findings its own
@@ -132,31 +278,47 @@ export default async function SecurityPage() {
           )}
         </section>
       ) : null}
+      <section aria-labelledby="policy-heading" className={orgCard}>
+        <h2 id="policy-heading" className="text-base font-semibold text-zk-text">Responsible disclosure</h2>
+        <div className="mt-3">
+          <ReadOnlyNote>
+            Share sensitive evidence through the private report. A workspace owner or admin decides when to publish the finding.
+          </ReadOnlyNote>
+        </div>
+      </section>
     </div>
   );
 }
 
+function securityFilterHref(severity: "all" | (typeof SECURITY_SEVERITIES)[number], stage: SecurityStageFilter, search?: URLSearchParams) {
+  const params = new URLSearchParams(search);
+  params.set("view", "findings");
+  if (severity !== "all") params.set("severity", severity);
+  if (stage !== "all") params.set("stage", stage);
+  return `/security?${params.toString()}`;
+}
+
 function Stat({ label, value, hint, alert = false }: { label: string; value: string; hint: string; alert?: boolean }) {
   return (
-    <div className={`security-stat rounded-[16px] border border-zk-border bg-zk-surface p-4${alert ? " security-stat--alert" : ""}`}>
-      <p className="text-xs font-bold uppercase tracking-[0.08em] text-zk-muted">{label}</p>
-      <p className="mt-1 text-[28px] font-extrabold tabular-nums leading-none text-zk-text">{value}</p>
+    <div className="min-w-0 p-4">
+      <p className="text-sm font-medium text-zk-text2">{label}</p>
+      <p className={`mt-1 text-2xl font-bold tabular-nums ${alert ? "text-zk-bad-fg" : "text-zk-text"}`}>{value}</p>
       <p className="mt-1 text-xs text-zk-text2">{hint}</p>
     </div>
   );
 }
 
-function FindingTable({ findings, kind }: { findings: DashboardFinding[]; kind: "open" | "disclosed" }) {
+function FindingTable({ findings, kind, filterHref }: { findings: DashboardFinding[]; kind: "open" | "disclosed"; filterHref: string }) {
   return (
     <div className="mt-3 overflow-x-auto">
-      <table className="security-table w-full min-w-[560px] text-left text-sm">
+      <table className="w-full text-left text-sm">
         <thead>
-          <tr className="text-xs uppercase tracking-wide text-zk-muted">
+          <tr className="text-xs text-zk-muted">
             <th scope="col" className="py-2 pr-3 font-semibold">Severity</th>
             <th scope="col" className="py-2 pr-3 font-semibold">Finding</th>
-            <th scope="col" className="py-2 pr-3 font-semibold">Stage</th>
-            <th scope="col" className="py-2 pr-3 text-right font-semibold">{kind === "open" ? "Open for" : "Took"}</th>
-            {kind === "disclosed" ? <th scope="col" className="py-2 font-semibold">Disclosed</th> : null}
+            <th scope="col" className="hidden py-2 pr-3 font-semibold sm:table-cell">Status</th>
+            <th scope="col" className="hidden py-2 pr-3 text-right font-semibold sm:table-cell">{kind === "open" ? "Open for" : "Took"}</th>
+            {kind === "disclosed" ? <th scope="col" className="hidden py-2 font-semibold sm:table-cell">Disclosed</th> : null}
           </tr>
         </thead>
         <tbody className="divide-y divide-zk-border">
@@ -164,20 +326,22 @@ function FindingTable({ findings, kind }: { findings: DashboardFinding[]; kind: 
             <tr key={finding.id}>
               <td className="py-2 pr-3 align-top"><SeverityChip severity={finding.severity} /></td>
               <td className="py-2 pr-3 align-top">
-                <Link href={finding.href} className="font-semibold text-zk-accent hover:underline">{finding.ref}</Link>{" "}
+                <Link href={finding.canView ? "/security/findings/" + finding.id + filterHref.slice("/security".length) : finding.href} className="font-semibold text-zk-accent hover:underline">{finding.ref}</Link>{" "}
                 {finding.title ? (
-                  <span className="text-zk-text">{finding.title}</span>
+                  <span className="break-words text-zk-text">{finding.title}</span>
                 ) : (
                   <span className="italic text-zk-muted">Details restricted</span>
                 )}
                 <span className="block text-xs text-zk-muted">{finding.project}</span>
+                <span className="block text-xs text-zk-text2 sm:hidden">{finding.stage} · {finding.days} d</span>
+                {finding.disclosedAt ? <span className="block text-xs text-zk-text2 sm:hidden"><LocalTime date={finding.disclosedAt} /></span> : null}
               </td>
-              <td className="py-2 pr-3 align-top text-zk-text2">{finding.stage}</td>
-              <td className="py-2 pr-3 text-right align-top tabular-nums text-zk-text2">{finding.days} d</td>
+              <td className="hidden py-2 pr-3 align-top text-zk-text2 sm:table-cell">{finding.stage}</td>
+              <td className="hidden py-2 pr-3 text-right align-top tabular-nums text-zk-text2 sm:table-cell">{finding.days} d</td>
               {kind === "disclosed" ? (
-                <td className="py-2 align-top text-xs text-zk-text2">
+                <td className="hidden py-2 align-top text-xs text-zk-text2 sm:table-cell">
                   {finding.disclosedAt ? <LocalTime date={finding.disclosedAt} /> : null}
-                  <span className="block">{finding.fixedLive ? "Fix live" : "Published early"}</span>
+                  <span className="block">{finding.fixedLive ? "Fix live" : "Published by an owner or admin"}</span>
                 </td>
               ) : null}
             </tr>
@@ -201,7 +365,7 @@ function ReportButton({ projects }: { projects: { name: string; ref: ProjectRef 
   return (
     <details className="security-report relative">
       <summary className={`${REPORT_BUTTON} cursor-pointer list-none`}>Report a vulnerability</summary>
-      <div className="absolute right-0 z-10 mt-2 w-64 rounded-2xl border border-zk-border bg-zk-surface p-2 shadow-lg">
+      <div className="absolute left-0 z-10 mt-2 w-64 sm:left-auto sm:right-0 rounded-2xl border border-zk-border bg-zk-surface p-2 shadow-lg">
         <p className="px-2 py-1 text-xs text-zk-muted">Which product is it in?</p>
         <ul>
           {projects.map((project) => (

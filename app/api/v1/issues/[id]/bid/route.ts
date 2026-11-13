@@ -20,6 +20,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
         votes: bid.votes,
         summary: bid.summary,
         description: bid.description,
+        reason: bid.reason,
         created_at: bid.createdAt.toISOString(),
         updated_at: bid.updatedAt.toISOString(),
         replies: bid.replies.map((reply) => ({
@@ -63,6 +64,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
         beneficiary_user_id: bid.beneficiaryUserId,
         summary: bid.summary,
         description: bid.description,
+        reason: bid.reason,
       }, { status: replaced ? 200 : 201 });
     } catch (error) {
       if (error instanceof IssueApiError) throw error;

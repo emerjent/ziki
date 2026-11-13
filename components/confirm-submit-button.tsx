@@ -14,11 +14,13 @@ export function ConfirmSubmitButton({
   variant = "danger-secondary",
   children,
   "aria-label": ariaLabel,
+  className,
 }: {
   confirm: ConfirmOptions;
   variant?: "primary" | "secondary" | "danger" | "danger-secondary";
   children: ReactNode;
   "aria-label"?: string;
+  className?: string;
 }) {
   const confirm = useConfirm();
   return (
@@ -26,6 +28,7 @@ export function ConfirmSubmitButton({
       type="submit"
       variant={variant}
       aria-label={ariaLabel}
+      className={className}
       onClick={async (event) => {
         const form = event.currentTarget.form;
         if (!form) return;

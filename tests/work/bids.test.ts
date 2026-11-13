@@ -9,7 +9,7 @@ const db = vi.hoisted(() => {
     issueClaim: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     pointEntry: { findMany: vi.fn() },
     bidVote: { findMany: vi.fn(), deleteMany: vi.fn() },
-    agent: { findFirst: vi.fn(), findMany: vi.fn() },
+    agent: { findFirst: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
     projectWorkflow: { findUnique: vi.fn() },
     $queryRaw: vi.fn(),
     $transaction: vi.fn(),
@@ -62,6 +62,7 @@ beforeEach(() => {
   db.agent.findMany.mockResolvedValue([]);
   db.projectWorkflow.findUnique.mockResolvedValue(null);
   db.agent.findFirst.mockResolvedValue(null);
+  db.agent.findUnique.mockResolvedValue({ pausedAt: null });
   db.issueBid.updateMany.mockResolvedValue({ count: 1 });
   db.bug.updateMany.mockResolvedValue({ count: 1 });
   db.issueBid.findUnique.mockResolvedValue(null);
@@ -72,6 +73,12 @@ beforeEach(() => {
 });
 
 describe("placeBid", () => {
+  it("refuses to bid while the owner has paused the agent (#236)", async () => {
+    db.agent.findUnique.mockResolvedValue({ pausedAt: new Date("2026-11-05T10:00:00Z") });
+    await expect(placePlan(caller, "project", "issue1")).rejects.toMatchObject({ status: 409, message: expect.stringContaining("paused") });
+    expect(db.issueBid.create).not.toHaveBeenCalled();
+  });
+
   it("records a bid and does not claim the issue", async () => {
     const { bid, replaced } = await placeBid(caller, "project", "issue1", plan);
     expect(bid.id).toBe("bid1");
@@ -84,8 +91,20 @@ describe("placeBid", () => {
       beneficiaryUserId: "ada",
       summary: plan.summary,
       description: plan.description,
+      reason: null,
     });
     expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({ type: "issue.bid" }));
+  });
+
+  it("takes bids on a Live · Broken issue, force-merged and judged faulty, and refuses them on other Live work (#force-merge)", async () => {
+    db.bug.findFirst.mockResolvedValue({ id: "issue1", projectId: "project", status: "resolved", substatus: "merged_broken", voteCount: 3 });
+    expect((await placeBid(caller, "project", "issue1", plan)).bid.id).toBe("bid1");
+    db.issueBid.create.mockClear();
+    for (const substatus of ["force_merged", "on_dev"]) {
+      db.bug.findFirst.mockResolvedValue({ id: "issue1", projectId: "project", status: "resolved", substatus, voteCount: 3 });
+      await expect(placeBid(caller, "project", "issue1", plan)).rejects.toMatchObject({ status: 409 });
+    }
+    expect(db.issueBid.create).not.toHaveBeenCalled();
   });
 
   it("bidding again replaces the agent's open bid instead of creating another", async () => {
@@ -93,7 +112,7 @@ describe("placeBid", () => {
     db.issueBid.update.mockResolvedValue({ id: "bid1", summary: "New plan.", description: "Better plan." });
     const result = await placeBid(caller, "project", "issue1", { summary: "New plan.", description: "Better plan." });
     expect(result).toMatchObject({ bid: { id: "bid1", summary: "New plan." }, replaced: true });
-    expect(db.issueBid.update).toHaveBeenCalledWith({ where: { id: "bid1" }, data: { summary: "New plan.", description: "Better plan." } });
+    expect(db.issueBid.update).toHaveBeenCalledWith({ where: { id: "bid1" }, data: { summary: "New plan.", description: "Better plan.", reason: null } });
     expect(db.issueBid.create).not.toHaveBeenCalled();
     expect(publish).not.toHaveBeenCalled();
   });
@@ -105,7 +124,7 @@ describe("placeBid", () => {
     expect(result.replaced).toBe(false);
     expect(db.issueBid.update).toHaveBeenCalledWith({
       where: { id: "bid1" },
-      data: { ...plan, withdrawnAt: null, beneficiaryUserId: "ada" },
+      data: { ...plan, reason: null, withdrawnAt: null, beneficiaryUserId: "ada" },
     });
     expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({ type: "issue.bid" }));
   });
@@ -172,6 +191,11 @@ describe("parseBid (#issue-bids)", () => {
       status: 400,
       body: expect.objectContaining({ message: expect.stringContaining("summary") }),
     }));
+  });
+
+  it("stores a valid optional reason and refuses an oversized one", () => {
+    expect(parseBid({ ...plan, reason: "I found the failing path." }).reason).toBe("I found the failing path.");
+    expect(() => parseBid({ ...plan, reason: "x".repeat(141) })).toThrow(expect.objectContaining({ status: 400 }));
   });
 });
 

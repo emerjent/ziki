@@ -5,6 +5,10 @@ import type { AgentActivityItem, AgentProfileData } from "./agent-profile";
 import type { AgentReview } from "./agent-reviews";
 import type { AgentTab } from "./agent-tabs";
 import { currentOrganisationIdFor } from "@/lib/organisation-context";
+import { isClaimStalled, classifyAgentStatus, AGENT_WORKING_WINDOW_MS } from "@/lib/dashboard-overview";
+import { isDeliveryOverdue } from "@/lib/claim-deadline";
+import { issueHref } from "@/lib/issue-ref";
+import { isAdminOfOrganisation } from "@/lib/agents/membership";
 
 /** The agent pages' data (#agent-profile): the public profile at /agent/{username} and its edit page. */
 
@@ -13,6 +17,116 @@ const ACTIVE_NOW_MS = 5 * 60_000;
 
 /** How many recent actions the profile lists. */
 const ACTIVITY_LIMIT = 20;
+
+export type AgentStuckContext = {
+  summary: string;
+  issue: { number: number; title: string; href: string } | null;
+  lastHeartbeatAt: Date | null;
+  deliverBy: Date | null;
+  deadlinePassed: boolean;
+};
+
+function quietDuration(since: Date | null, now: Date): string {
+  if (!since) return "a while";
+  const minutes = Math.max(1, Math.floor((now.getTime() - since.getTime()) / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} h`;
+  return `${Math.floor(hours / 24)} days`;
+}
+
+/** Private, organisation-scoped stuck context for members viewing an agent profile. */
+export async function loadAgentStuckContext({
+  agentId,
+  organisationId,
+  viewer,
+  now = new Date(),
+}: {
+  agentId: string;
+  organisationId: string;
+  viewer: { id: string; role?: import("@/lib/roles").AppRole | null };
+  now?: Date;
+}): Promise<AgentStuckContext | null> {
+  const [membership, isAdmin] = await Promise.all([
+    prisma.membership.findUnique({
+      where: { organisationId_userId: { organisationId, userId: viewer.id } },
+      select: { userId: true },
+    }),
+    isAdminOfOrganisation(viewer, organisationId),
+  ]);
+  if (!membership && !isAdmin) return null;
+
+  const agent = await prisma.agent.findFirst({
+    where: {
+      id: agentId,
+      revokedAt: null,
+      activations: { some: { organisationId, deactivatedAt: null } },
+    },
+    select: {
+      questions: {
+        where: { answeredAt: null, OR: [{ bug: { organisationId } }, { bugId: null }] },
+        take: 1,
+        select: { id: true },
+      },
+      claims: {
+        where: { status: "active", releasedAt: null, bug: { organisationId } },
+        orderBy: [{ claimedAt: "desc" }, { id: "desc" }],
+        take: 1,
+        select: {
+          claimedAt: true,
+          lastHeartbeatAt: true,
+          deliverBy: true,
+          waitingOnOwnerSince: true,
+          bug: {
+            select: {
+              number: true,
+              title: true,
+              status: true,
+              isDeleted: true,
+              pullRequestUrl: true,
+              project: { select: { slug: true, organisation: { select: { slug: true } } } },
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!agent) return null;
+
+  const claim = agent.claims[0] ?? null;
+  const bug = claim?.bug ?? null;
+  const heartbeat = claim?.lastHeartbeatAt ?? claim?.claimedAt ?? null;
+  const claimHeld = Boolean(claim && bug && !bug.isDeleted && bug.status === "in_progress");
+  const quiet = heartbeat === null || heartbeat.getTime() < now.getTime() - AGENT_WORKING_WINDOW_MS;
+  const deadlinePassed = isDeliveryOverdue(claim?.deliverBy, now);
+  const stalled = claimHeld && isClaimStalled({
+    quiet,
+    deliverBy: claim?.deliverBy,
+    waitingOnOwnerSince: claim?.waitingOnOwnerSince ?? null,
+    pullRequestUrl: bug?.pullRequestUrl ?? null,
+    now,
+  });
+  const status = classifyAgentStatus({
+    hasUnansweredQuestion: agent.questions.length > 0,
+    hasStalledClaim: stalled,
+    hasActiveClaim: claimHeld && !quiet,
+    lastSeenAt: heartbeat,
+    now,
+  });
+  if (status !== "stuck") return null;
+
+  return {
+    summary: bug
+      ? deadlinePassed
+        ? `Past its deadline on #${bug.number} ${bug.title}`
+        : `No word on #${bug.number} for ${quietDuration(heartbeat, now)}`
+      : "This agent needs attention.",
+    issue: bug ? { number: bug.number, title: bug.title, href: issueHref(bug) } : null,
+    lastHeartbeatAt: heartbeat,
+    deliverBy: claim?.deliverBy ?? null,
+    deadlinePassed,
+  };
+}
 
 /** The username as it arrived, decoded in case it arrived still encoded, lowercased. */
 function usernameFrom(raw: string): string {

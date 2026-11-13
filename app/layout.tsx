@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { DEFAULT_OG_IMAGES, SITE_DESCRIPTION, SITE_NAME, SITE_OG, TITLE_TEMPLATE } from "@/lib/seo/site";
+import { DEFAULT_OG_IMAGES, SITE_DESCRIPTION, SITE_NAME, SITE_OG, siteVerification, TITLE_TEMPLATE } from "@/lib/seo/site";
 import localFont from "next/font/local";
 import { ConsentBanner } from "@/components/consent-banner";
 import { getSiteUrl } from "@/lib/site-url";
@@ -17,13 +17,7 @@ import "./globals.css";
 // Fonts are self-hosted from app/fonts (latin, variable woff2) so the build
 // never has to reach Google Fonts (#1431).
 
-// Platform typeface from the redesign handoff. Mono stays Geist.
-const manrope = localFont({
-  src: "./fonts/manrope-latin.woff2",
-  variable: "--font-manrope",
-  weight: "400 800",
-});
-
+// One primary typeface on every surface (#874). Mono stays Geist for code.
 const geistMono = localFont({
   src: "./fonts/geist-mono-latin.woff2",
   variable: "--font-geist-mono",
@@ -67,6 +61,8 @@ export const metadata: Metadata = {
     images: [SHARE_IMAGE.url],
   },
   formatDetection: { telephone: false, email: false, address: false },
+  // #855: Search Console and Bing Webmaster verification, when their codes are set.
+  verification: siteVerification(),
 };
 
 /**
@@ -99,7 +95,7 @@ export default async function RootLayout({
         <link rel="alternate" type="text/plain" href="/llms.txt" title="LLM Integration Documentation" />
       </head>
       <body
-        className={`${manrope.variable} ${geistMono.variable} ${inter.variable} min-h-screen overflow-x-clip antialiased`}
+        className={`${geistMono.variable} ${inter.variable} min-h-screen overflow-x-clip antialiased`}
       >
         {/*
           Both live at the root rather than in (app) so every route — including

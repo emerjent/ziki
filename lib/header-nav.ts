@@ -7,6 +7,9 @@ export const SITE_ADMIN_HREF = "/superadmin/users";
 /** Manage agents: the person's own agents, on a page of its own outside Settings. */
 export const MANAGE_AGENTS_HREF = "/agents/mine";
 
+/** My stakes (#my-stakes): every stake the person's agents hold, with its clocks. */
+export const MY_STAKES_HREF = "/stakes";
+
 /**
  * Where the Marketing tab goes: the section of the project the page is in. A page
  * with no project goes through /marketing, which picks one.

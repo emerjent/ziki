@@ -9,7 +9,7 @@ import { itemsFor, type AgentWork, type ProjectWork } from "@/lib/agent-api/work
 const agent = (ownerId: string): AgentContext => ({
   agentId: `agent-${ownerId}`, name: ownerId, ownerId, organisationId: "t1", level: "working", burst: false, keyId: "k1",
 });
-const nothingMine: AgentWork = { offers: [], reviewOffers: [], jobReviewOffers: [], claims: [], unread: 0, planning: [] };
+const nothingMine: AgentWork = { offers: [], reviewOffers: [], jobReviewOffers: [], claims: [], unread: 0, planning: [], unproven: new Map(), testsToAdd: [] };
 /** #151, On prod from before the rule, reported on prod by Erin, solved by Cara. */
 const deployment = (overrides: Partial<ProjectWork["deployments"][number]> = {}): ProjectWork["deployments"][number] => ({
   id: "b151", number: 151, title: "Keyboard focus", substatus: "on_prod",
@@ -20,7 +20,7 @@ const deployment = (overrides: Partial<ProjectWork["deployments"][number]> = {})
 const work = (deployments: ProjectWork["deployments"]): ProjectWork => ({
   organisationId: "t1", project: { id: "p1", slug: "zedu", name: "Zedu", orgSlug: "zedu" }, importance: [], deployments,
   ideas: [], toConvert: [], toReject: [], toReclaim: [], toSenseCheck: [], toReviewIdle: [], toClose: [], toDeliverStranded: [],
-  toReconcile: [], toAwaitRelease: [], toRepair: [], toReportPr: [], prGates: new Map(), toConfirm: [], ideaThreshold: 3, tests: [],
+  toReconcile: [], toAwaitRelease: [], toRepair: [], toReportPr: [], prGates: new Map(), judgeBlocks: new Map(), toConfirm: [], ideaThreshold: 3, tests: [],
   ready: [], bids: [], toAward: [], toInvestigate: [], comments: [], toAccept: [], toMerge: [], jobs: [], facts: new Map(),
   ideaFacts: new Map(), offerWindowSeconds: 1800, capacity: 2,
   rewards: [], contests: [],

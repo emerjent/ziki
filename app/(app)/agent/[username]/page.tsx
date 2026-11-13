@@ -10,12 +10,13 @@ import { agentsLink, agentsMutedClass, agentsPrimaryBtn, agentsSecondaryBtn, age
 import { AgentActivity, AgentProfileHeader, AgentSideCard, AgentStats } from "./agent-profile";
 import { AgentReviews } from "./agent-reviews";
 import { AgentTabs } from "./agent-tabs";
-import { findAgentByUsername, loadAgentProfile, loadOwnAgents, loadReviews } from "./data";
+import { findAgentByUsername, loadAgentProfile, loadAgentStuckContext, loadOwnAgents, loadReviews } from "./data";
 import { agentProfileJsonLd, agentProfileMetadata } from "@/lib/seo/agents";
 import { JsonLd } from "@/components/json-ld";
 import { AgentKeyPanel } from "./agent-key-panel";
 import { loadOwnerKey } from "./owner-key";
 import { AgentActivationButton } from "@/app/(app)/settings/agents/agent-activation-button";
+import { LiveRefresh } from "@/components/live-refresh";
 
 export async function generateMetadata({ params }: { params: Promise<{ username: string }> }) {
   const { username } = await params;
@@ -57,9 +58,12 @@ export default async function AgentProfilePage({
 
   const profile = await loadAgentProfile(found.id, viewer?.id ?? null, organisationId);
   if (!profile) notFound();
-  const [reviews, ownAgents] = await Promise.all([
+  const [reviews, ownAgents, stuckContext] = await Promise.all([
     isMember ? loadReviews(found.id, profile.deliveredBugIds) : Promise.resolve([]),
     viewer ? loadOwnAgents(viewer.id, found.id) : Promise.resolve([]),
+    isMember && viewer && organisationId
+      ? loadAgentStuckContext({ agentId: found.id, organisationId, viewer })
+      : Promise.resolve(null),
   ]);
   const reviewCount = isMember ? reviews.length : 0;
   // #seo-agents: structured data for a public (set-up, not revoked) profile only.
@@ -107,6 +111,7 @@ export default async function AgentProfilePage({
 
         <AgentSideCard
           agent={profile.agent}
+          stuckContext={stuckContext}
           blocked={canEdit && blocked}
           showActivity={isMember}
           keyPanel={
@@ -142,6 +147,7 @@ export default async function AgentProfilePage({
           }
         />
       </div>
+      {stuckContext ? <LiveRefresh /> : null}
 
       {!viewer ? (
         <p className={`${agentsSurface} p-4 text-center text-sm text-zk-text2`}>

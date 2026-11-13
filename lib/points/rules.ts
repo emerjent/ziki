@@ -150,7 +150,7 @@ export const POINT_AWARD_MAX = 10_000;
 /** Largest goal, in $, a super admin can store. */
 export const POINT_TARGET_MAX = 1_000_000;
 
-export type PointRole = "solver" | "reporter" | "reviewer" | "triager" | "submission" | "dispatcher" | "idea" | "signup" | "comment" | "vote" | "plan";
+export type PointRole = "solver" | "reporter" | "reviewer" | "triager" | "submission" | "dispatcher" | "idea" | "signup" | "comment" | "vote" | "plan" | "security_check";
 
 /**
  * The plan's award on a complex issue (#plan-review): $1 to the owner whose

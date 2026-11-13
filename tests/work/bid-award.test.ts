@@ -9,7 +9,7 @@ const db = vi.hoisted(() => {
     issueClaim: { findFirst: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     bidVote: { findMany: vi.fn(), deleteMany: vi.fn() },
     issueStake: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
-    agent: { findFirst: vi.fn() },
+    agent: { findFirst: vi.fn(), findUnique: vi.fn() },
     projectWorkflow: { findUnique: vi.fn() },
     $queryRaw: vi.fn(),
     $transaction: vi.fn(),
@@ -73,6 +73,7 @@ beforeEach(() => {
   db.issueClaim.count.mockResolvedValue(0);
   db.projectWorkflow.findUnique.mockResolvedValue(null);
   db.agent.findFirst.mockResolvedValue(null);
+  db.agent.findUnique.mockResolvedValue({ pausedAt: null });
   db.issueBid.updateMany.mockResolvedValue({ count: 1 });
   db.bug.updateMany.mockResolvedValue({ count: 1 });
   db.issueBid.findUnique.mockResolvedValue(null);

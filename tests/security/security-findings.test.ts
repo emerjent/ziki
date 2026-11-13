@@ -3,8 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Private security findings (#security-findings): the details live apart from
  * the shared idea and issue rows, only the reporter, workspace owners and
- * admins and cleared agents read them, and they are published once the fix is
- * live (or an admin publishes them early).
+ * admins and cleared agents read them, and they are published by a workspace owner or admin.
  */
 const db = vi.hoisted(() => ({
   agentActivation: { findUnique: vi.fn() },
@@ -12,6 +11,7 @@ const db = vi.hoisted(() => ({
   attachment: { updateMany: vi.fn() },
   bug: { update: vi.fn() },
   idea: { update: vi.fn() },
+  project: { findMany: vi.fn() },
   securityFinding: { findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   $transaction: vi.fn(),
 }));
@@ -24,7 +24,6 @@ import {
   agentFindingViewer,
   canViewFinding,
   discloseFinding,
-  discloseLiveFindings,
   findingView,
   isPrivateFinding,
   placeholderTitle,
@@ -33,7 +32,7 @@ import {
   type FindingViewer,
 } from "@/lib/security-findings";
 import { isSecuritySeverity, SECURITY_SEVERITIES } from "@/lib/security-severity";
-import { median } from "@/lib/security-dashboard";
+import { loadSecurityDashboard, median } from "@/lib/security-dashboard";
 import { createIdeaSchema } from "@/lib/agent-api/ideas";
 import { securityJson } from "@/lib/agent-api/issues";
 
@@ -128,7 +127,7 @@ describe("what a viewer is shown", () => {
 describe("the placeholder", () => {
   it("names the severity but nothing else", () => {
     expect(placeholderTitle("critical")).toBe("Private security finding (Critical)");
-    expect(PLACEHOLDER_DESCRIPTION).toContain("published here automatically once the fix is live");
+    expect(PLACEHOLDER_DESCRIPTION).toContain("Only a workspace owner or admin can publish them");
   });
 
   it("accepts only the four severities", () => {
@@ -160,19 +159,19 @@ describe("disclosing a finding", () => {
 
   it("copies the real text onto the idea and issue, moves the files and announces it", async () => {
     db.securityFinding.findUnique.mockResolvedValueOnce(stored);
-    expect(await discloseFinding(db as never, "finding1", null)).toBe(true);
+    expect(await discloseFinding(db as never, "finding1", "user-admin")).toBe(true);
     const text = { title: "Real title", summary: "Real summary", description: "Real steps" };
     expect(db.idea.update).toHaveBeenCalledWith({ where: { id: "idea1" }, data: text });
     expect(db.bug.update).toHaveBeenCalledWith({ where: { id: "bug1" }, data: text });
     expect(db.attachment.updateMany).toHaveBeenCalledWith({ where: { securityFindingId: "finding1" }, data: { ideaId: "idea1", bugId: "bug1" } });
-    expect(db.securityFinding.update).toHaveBeenCalledWith({ where: { id: "finding1" }, data: { disclosedAt: expect.any(Date), disclosedById: null } });
+    expect(db.securityFinding.update).toHaveBeenCalledWith({ where: { id: "finding1" }, data: { disclosedAt: expect.any(Date), disclosedById: "user-admin" } });
     const event = (db.agentEvent.create.mock.calls[0] as unknown as [{ data: { type: string; payload: Record<string, unknown> } }])[0].data;
     expect(event.type).toBe("security.disclosed");
-    expect(event.payload).toMatchObject({ findingId: "finding1", reason: "fix_live", severity: "high" });
+    expect(event.payload).toMatchObject({ findingId: "finding1", reason: "authorized_disclosure", severity: "high", actor: { kind: "user", id: "user-admin" } });
     expect(JSON.stringify(event.payload)).not.toContain("Real steps");
   });
 
-  it("records who disclosed it early", async () => {
+  it("records who disclosed an unconverted finding", async () => {
     db.securityFinding.findUnique.mockResolvedValueOnce({ ...stored, bugId: null });
     await discloseFinding(db as never, "finding1", "user-admin");
     expect(db.bug.update).not.toHaveBeenCalled();
@@ -181,19 +180,25 @@ describe("disclosing a finding", () => {
 
   it("does nothing the second time", async () => {
     db.securityFinding.findUnique.mockResolvedValueOnce({ ...stored, disclosedAt: new Date() });
-    expect(await discloseFinding(db as never, "finding1", null)).toBe(false);
+    expect(await discloseFinding(db as never, "finding1", "user-admin")).toBe(false);
     expect(db.idea.update).not.toHaveBeenCalled();
     expect(db.securityFinding.update).not.toHaveBeenCalled();
   });
 
-  it("sweeps only private findings whose issue is Live", async () => {
-    db.securityFinding.findMany.mockResolvedValueOnce([{ id: "finding1" }]);
-    db.securityFinding.findUnique.mockResolvedValueOnce(stored);
-    db.$transaction.mockImplementation(async (run: (tx: typeof db) => Promise<unknown>) => run(db));
-    expect(await discloseLiveFindings({ organisationId: ORG }, db as never)).toBe(1);
-    expect(db.securityFinding.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { disclosedAt: null, organisationId: ORG, bug: { status: "resolved", isDeleted: false } },
-    }));
+  it("keeps a live finding private when the dashboard is opened", async () => {
+    db.securityFinding.findMany.mockResolvedValueOnce([{
+      ...row(),
+      bug: { number: 7, status: "resolved", substatus: "on_prod" },
+      idea: null,
+      project: { name: "Web", slug: "web", organisation: { slug: "ziki" } },
+    }]);
+    db.project.findMany.mockResolvedValueOnce([]);
+
+    const dashboard = await loadSecurityDashboard(ORG, person("user-member"));
+
+    expect(dashboard.disclosed).toEqual([]);
+    expect(dashboard.open).toEqual([expect.objectContaining({ title: null, canView: false })]);
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it("knows a finding is still private, so its placeholder can't be edited", async () => {

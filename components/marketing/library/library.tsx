@@ -79,7 +79,7 @@ export function Library({
   initial,
 }: {
   slug: ProjectRef;
-  projectName: string;
+  projectName?: string;
   initial: LibraryResult;
 }) {
   const params = useSearchParams();
@@ -243,7 +243,7 @@ export function Library({
   const tasksPath = marketingPath(slug);
   return (
     <div className="lb-page" data-detail={detail}>
-      <LibraryHeading slug={slug} projectName={projectName} />
+      <LibraryHeading />
       {!result.ok ? (
         <section className="lb-state" aria-busy={pending}>
           <span className="lb-state-icon lb-warning" aria-hidden="true">
@@ -566,6 +566,7 @@ export function Library({
       )}
     </div>
   );
+}
 }
 
 function DeliverablePreview({

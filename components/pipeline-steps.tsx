@@ -12,11 +12,11 @@ import Link from "next/link";
  */
 export type PipelineStage = { label: string; count: number; href: string; selected: boolean };
 
-export function PipelineSteps({ stages }: { stages: PipelineStage[] }) {
+export function PipelineSteps({ stages, label = "Stages" }: { stages: PipelineStage[]; label?: string }) {
   return (
     // One row whatever the number of stages (Your Work and Live come and go): a column each, about 133px wide.
     <nav
-      aria-label="Stages"
+      aria-label={label}
       className="grid w-full grid-cols-[repeat(var(--stages),minmax(0,1fr))] gap-x-1.5 max-sm:gap-x-0 max-sm:border-b max-sm:border-zk-border"
       style={{ "--stages": stages.length, maxWidth: stages.length * 133 } as React.CSSProperties}
     >

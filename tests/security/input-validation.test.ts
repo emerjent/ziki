@@ -1,10 +1,16 @@
 import { createSubmissionSchema } from "@/lib/validations/skill";
 import { describe, expect, it } from "vitest";
-import { createBugSchema, signupSchema, updateBugSchema } from "@/lib/validations/issue";
+import { createBugSchema, retestRequestSchema, signupSchema, updateBugSchema } from "@/lib/validations/issue";
 import { safeCallbackUrl } from "@/lib/safe-callback-url";
 import { safeHref } from "@/lib/rich-text";
 import { agentProfileUpdateSchema, agentSkillsReplaceSchema } from "@/lib/validations/agent-profile";
+import { agentCommentSchema } from "@/lib/agent-api/issues";
+import { bidSchema } from "@/lib/agent-api/bid";
+import { deliveryBodySchema } from "@/lib/agent-api/delivery";
+import { testVerdictBodySchema } from "@/lib/agent-api/test-verdict";
+import { addRowsSchema } from "@/lib/proof";
 import { isScanned, preflight, scanFile } from "@/lib/security/preflight-scan";
+import { sitePageUrl } from "@/lib/marketing/site-reader";
 
 /** Invalid payloads and unsafe input are rejected before they reach the database or the page. */
 const valid = { title: "Login button broken", description: "Clicking sign in does nothing on mobile." };
@@ -29,6 +35,14 @@ describe("issue payloads", () => {
   it("rejects proof links that aren't GitHub URLs", () => {
     expect(createBugSchema.safeParse({ ...valid, proofLinks: "ftp://files.example.com/shot.png" }).success).toBe(false);
     expect(createBugSchema.safeParse({ ...valid, proofLinks: "https://example.com/screenshot.png" }).success).toBe(false);
+  });
+
+  it("accepts an unknown installed version and rejects missing or oversized retest details", () => {
+    expect(retestRequestSchema.parse({ operatingSystem: "Not sure", installedVersion: "", currentBehavior: "The save button still does nothing." })).toMatchObject({ installedVersion: "Unknown" });
+    expect(retestRequestSchema.safeParse({ operatingSystem: "Windows", installedVersion: "x".repeat(81), currentBehavior: "The save button still does nothing." }).success).toBe(false);
+    expect(retestRequestSchema.safeParse({ operatingSystem: "Windows", installedVersion: "1.2.3", currentBehavior: "still broken" }).success).toBe(true);
+    expect(retestRequestSchema.safeParse({ operatingSystem: "Windows", currentBehavior: "short" }).success).toBe(false);
+    expect(retestRequestSchema.safeParse({ operatingSystem: "UnknownOS", currentBehavior: "The save button still does nothing." }).success).toBe(false);
   });
 });
 
@@ -77,6 +91,51 @@ describe("agent profiles", () => {
     expect(agentSkillsReplaceSchema.safeParse({ skills: [skill, { ...skill, tag: "postgres" }] }).success).toBe(false);
     expect(agentSkillsReplaceSchema.safeParse({ skills: Array.from({ length: 21 }, (_, n) => ({ ...skill, tag: `Tag ${n}` })) }).success).toBe(false);
     expect(agentSkillsReplaceSchema.safeParse({ skills: [{ ...skill, summary: "a".repeat(121) }] }).success).toBe(false);
+  });
+});
+
+describe("agent write reasons (#236)", () => {
+  const bodies = [
+    [bidSchema, { summary: "I can fix it.", description: "I will update the implementation." }],
+    [agentCommentSchema, { summary: "One concern.", body: "This path still races." }],
+    [deliveryBodySchema, { pullRequestUrl: "https://github.com/acme/app/pull/1", summary: "Fixed.", description: "Updated the route.", testResults: "pass" }],
+    [testVerdictBodySchema, { goodToMerge: true, summary: "Looks good.", description: "Checked the changed route.", files: [{ path: "app/route.ts", lines: "1-20" }] }],
+  ] as const;
+
+  it.each(bodies)("accepts an omitted or valid reason", (schema, body) => {
+    expect(schema.safeParse(body).success).toBe(true);
+    expect(schema.safeParse({ ...body, reason: "Explains why this write is useful." }).success).toBe(true);
+  });
+
+  it.each(bodies)("rejects a reason longer than 140 characters", (schema, body) => {
+    expect(schema.safeParse({ ...body, reason: "x".repeat(141) }).success).toBe(false);
+  });
+});
+
+describe("judgement proof (#deeper-testing)", () => {
+  const verdict = { goodToMerge: true, summary: "Looks good.", description: "Checked it on a phone.", files: [{ path: "app/route.ts" }] };
+
+  it("accepts a pass with its upload and a not-applicable with its reason", () => {
+    const proof = { checks: { phone: { result: "pass", attachmentId: "att_1", shows: "The composer at 375px." }, staging: { result: "na", reason: "Nothing here runs on staging." } } };
+    expect(testVerdictBodySchema.safeParse({ ...verdict, proof }).success).toBe(true);
+  });
+
+  it("refuses a pass or fail with no upload or no word on what it shows, a not-applicable with no reason, and an unknown result or field", () => {
+    for (const entry of [{ result: "pass" }, { result: "fail" }, { result: "na" }, { result: "maybe", attachmentId: "att_1" }, { result: "pass", attachmentId: "att_1", extra: 1 }, { result: "pass", attachmentId: "att_1" }]) {
+      expect(testVerdictBodySchema.safeParse({ ...verdict, proof: { checks: { phone: entry } } }).success).toBe(false);
+    }
+    expect(testVerdictBodySchema.safeParse({ ...verdict, proof: { rating: "fine" } }).success).toBe(false);
+    // A flood of entries isn't proof: a handful of checks apply to an issue, and a card holds at most 12 squares.
+    const checks = Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`check-${i}`, { result: "pass", attachmentId: "att_1", shows: "The composer at 375px." }]));
+    expect(testVerdictBodySchema.safeParse({ ...verdict, proof: { checks } }).success).toBe(false);
+    const flood = Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`row-${i}`, { result: "pass", attachmentId: "att_1", shows: "The composer at 375px." }]));
+    expect(testVerdictBodySchema.safeParse({ ...verdict, proof: { squares: flood } }).success).toBe(false);
+  });
+
+  it("refuses a beyond row without its kind, and rows past the limit", () => {
+    expect(addRowsSchema.safeParse({ rows: [{ text: "Two tabs at once", source: "beyond" }] }).success).toBe(false);
+    expect(addRowsSchema.safeParse({ rows: [{ text: "Two tabs at once", source: "beyond", kind: "two_at_once" }] }).success).toBe(true);
+    expect(addRowsSchema.safeParse({ rows: Array.from({ length: 13 }, () => ({ text: "A criterion", source: "criteria" })) }).success).toBe(false);
   });
 });
 
@@ -181,5 +240,30 @@ describe("preflight", () => {
     expect(result.state).toBe("warning");
     expect(result.findings).toHaveLength(1);
     expect(result.scanned).toBe(2);
+  });
+});
+
+describe("the Marketing assistant's website reader (#marketing-assistant)", () => {
+  const site = "https://acme.dev";
+
+  it("reads pages on the project's own site, with or without www", () => {
+    expect(sitePageUrl(site, "/pricing")?.toString()).toBe("https://acme.dev/pricing");
+    expect(sitePageUrl(site, "pricing")?.toString()).toBe("https://acme.dev/pricing");
+    expect(sitePageUrl(site, "https://www.acme.dev/about#team")?.toString()).toBe("https://www.acme.dev/about");
+  });
+
+  it("refuses any other address the model asks for", () => {
+    for (const path of [
+      "https://evil.com/",
+      "//evil.com/pricing",
+      "https://acme.dev.evil.com/",
+      "http://acme.dev/",
+      "https://user:pass@acme.dev/",
+      "https://acme.dev:8443/",
+      "https://169.254.169.254/latest/meta-data",
+      "file:///etc/passwd",
+    ]) {
+      expect(sitePageUrl(site, path)).toBeNull();
+    }
   });
 });

@@ -16,6 +16,7 @@ export type BidEntryView = {
   by: string;
   summary: string;
   description: string;
+  reason?: string | null;
   areaMatch: boolean;
   /** The bid owner's record, across their agents in this organisation (#825). */
   record?: BidderRecordView;
@@ -205,6 +206,7 @@ function BidList({ bids, canAward = false, awardThreshold }: { bids: BidEntryVie
                     </span>
                   </p>
                   <EntrySummary summary={bid.summary} description={bid.description} />
+                  {bid.reason ? <p className="mt-1 text-xs text-zk-muted"><b>Reason:</b> {bid.reason}</p> : null}
                   {bid.record ? <BidderRecord record={bid.record} /> : null}
                   <EntryReplies replies={bid.replies} />
                 </div>

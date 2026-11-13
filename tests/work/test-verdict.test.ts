@@ -1,5 +1,6 @@
 import { afterSendBack, judgementCounts } from "@/lib/marketing/track";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { buildCard, checksFor, countsWithProof, judgementProof, NO_CHECKS, proofProblem, type ProofRules } from "@/lib/proof";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** Judging delivered work (#434, #529, #727, #owner-agents): the agent holding the claim can't judge its own work, anyone else can; one verdict per agent; good to merge needs a ready pull request; weighted judgements move the issue. */
 type Row = {
@@ -14,13 +15,40 @@ type Row = {
   changedAt?: Date | null;
 };
 
-const state = vi.hoisted(() => ({ verdicts: [] as Row[] }));
+const state = vi.hoisted(() => ({ verdicts: [] as Row[], reviewOffers: [] as Array<{
+  id: string;
+  bugId: string;
+  beneficiaryUserId: string;
+  agentId: string;
+  status: string;
+  offeredAt: Date;
+  deadlineAt: Date | null;
+  pullRequestUrl: string;
+  headSha: string | null;
+  expiredAt?: Date;
+}>, jobReviewOffers: [] as Array<{
+  id: string;
+  submissionId: string;
+  agentId: string;
+  beneficiaryUserId: string;
+  status: string;
+  offeredAt: Date;
+  expiredAt?: Date;
+}> }));
 
 const db = vi.hoisted(() => ({
   bug: { findFirst: vi.fn() },
   delivery: { findFirst: vi.fn(), findMany: vi.fn() },
-  membership: { findUnique: vi.fn() },
-  testVerdict: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+  membership: { findUnique: vi.fn(), findMany: vi.fn() },
+  issueClaim: { groupBy: vi.fn() },
+  projectWorkflow: { findUnique: vi.fn() },
+  reviewOffer: { findMany: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn(), create: vi.fn(), groupBy: vi.fn() },
+  testVerdict: { findFirst: vi.fn(), findMany: vi.fn(async () => []), create: vi.fn(), update: vi.fn() },
+  // #deeper-testing: no checks set, so every judgement counts as before.
+  proofRule: { findMany: vi.fn(async (): Promise<unknown[]> => []) },
+  proofCheck: { findMany: async () => [] },
+  attachment: { updateMany: vi.fn(), findMany: vi.fn() },
+  testCardRow: { findFirst: vi.fn(), findMany: vi.fn(async () => []), count: vi.fn(), createMany: vi.fn(), update: vi.fn() },
   pullRequestReport: { findFirst: vi.fn() },
   agentAuditEvent: { create: vi.fn() },
   comment: { create: vi.fn() },
@@ -28,11 +56,14 @@ const db = vi.hoisted(() => ({
   agentEvent: { create: vi.fn() },
   webhookSubscription: { findMany: vi.fn() },
   webhookDelivery: { createMany: vi.fn() },
+  $queryRaw: vi.fn(),
   jobSubmission: { findUnique: vi.fn(), update: vi.fn() },
   jobReview: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
-  jobReviewOffer: { findFirst: vi.fn(), update: vi.fn() },
+  jobReviewOffer: {
+    findFirst: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), create: vi.fn(),
+    update: vi.fn(), updateMany: vi.fn(), groupBy: vi.fn(),
+  },
   pointEntry: { createMany: vi.fn() },
-  $queryRaw: vi.fn(),
   $transaction: vi.fn(),
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
@@ -69,13 +100,18 @@ function report(overrides: Record<string, unknown> = {}) {
 }
 
 import { submitTestVerdict } from "@/lib/agent-api/test-verdict";
-import { reviewJobSubmission } from "@/lib/jobs/review";
+import { actOnTestCardRow, addTestCardRows } from "@/lib/agent-api/test-card";
+import { acceptReviewOffer, REVIEW_DEADLINE_MS, REVIEW_OFFER_TTL_MS, sweepReviewOffers } from "@/lib/agent-api/review-offer";
+import { acceptJobReviewOffer, reviewJobSubmission } from "@/lib/jobs/review";
+import { judgeBlockKind } from "@/lib/agent-api/judge-block";
+import type { PrGate } from "@/lib/agent-api/pr-gate";
 
 /** An issue Ada filed herself, with no agent and no claim. */
 function bugRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "bug1",
     organisationId: "organisation_zedu",
+    projectId: "project1",
     status: "done", substatus: "requires_review",
     pullRequestUrl: PR,
     pullRequestHeadSha: null as string | null,
@@ -101,11 +137,31 @@ const notGood = (description: string) => ({ goodToMerge: false, summary: "Not go
 beforeEach(() => {
   vi.clearAllMocks();
   state.verdicts = [];
+  state.reviewOffers = [];
+  state.jobReviewOffers = [];
   db.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(db));
   db.bug.findFirst.mockResolvedValue(bugRow());
   db.delivery.findFirst.mockResolvedValue(null);
   db.delivery.findMany.mockResolvedValue([]);
   db.membership.findUnique.mockResolvedValue({ id: "m1" });
+  db.membership.findMany.mockResolvedValue([]);
+  db.issueClaim.groupBy.mockResolvedValue([]);
+  db.projectWorkflow.findUnique.mockResolvedValue(null);
+  db.reviewOffer.findMany.mockResolvedValue([]);
+  db.reviewOffer.findUnique.mockResolvedValue(null);
+  db.reviewOffer.updateMany.mockResolvedValue({ count: 0 });
+  db.reviewOffer.groupBy.mockResolvedValue([]);
+  db.reviewOffer.create.mockImplementation(async ({ data }: { data: Omit<(typeof state.reviewOffers)[number], "id"> }) => {
+    const row = { id: `review${state.reviewOffers.length + 1}`, ...data };
+    state.reviewOffers.push(row);
+    return row;
+  });
+  db.jobReviewOffer.findMany.mockResolvedValue([]);
+  db.jobReviewOffer.findUnique.mockResolvedValue(null);
+  db.jobReviewOffer.create.mockResolvedValue({ id: "job-review-1" });
+  db.jobReviewOffer.updateMany.mockResolvedValue({ count: 0 });
+  db.jobReviewOffer.groupBy.mockResolvedValue([]);
+  db.$queryRaw.mockResolvedValue([{ id: "bug1" }]);
   db.comment.create.mockResolvedValue({ id: "c1" });
   db.bugActivity.create.mockResolvedValue({});
   db.pullRequestReport.findFirst.mockResolvedValue(report());
@@ -360,6 +416,8 @@ describe("the Delivered rule after each judgement (#delivered-step)", () => {
           })),
         ),
       },
+      proofRule: { findMany: async () => [] },
+      proofCheck: { findMany: async () => [] },
       issueClaim: { update: vi.fn(async () => ({})) },
       bugActivity: { create: vi.fn(async () => ({})) },
       agentEvent: { create: vi.fn(async () => ({ id: "e1" })) },
@@ -554,5 +612,406 @@ describe("sending marketing work back", () => {
     const pr = "https://github.com/emerjent/ziki/pull/1";
     expect(judgementCounts("product", { updatedAt: before, pullRequestUrl: pr }, { updatedAt: delivered, pullRequestUrl: pr })).toBe(true);
     expect(judgementCounts("product", { updatedAt: after, pullRequestUrl: "other" }, { updatedAt: delivered, pullRequestUrl: pr })).toBe(false);
+  });
+});
+
+/** What stops testers judging a delivered pull request (#864). */
+const blockGate = (overrides: Partial<PrGate> = {}): PrGate => ({
+  canDeliver: true, canAccept: true, canReconcile: false, awaitingRelease: false, broken: null, needsReport: false, reason: null, ...overrides,
+});
+const blockReport = (overrides: Record<string, unknown> = {}) => ({ state: "open", mergeable: true, checks: "passing", ...overrides }) as Parameters<typeof judgeBlockKind>[1];
+
+describe("judgeBlockKind", () => {
+  it("is null for an open, mergeable pull request with passing checks, or none reported", () => {
+    expect(judgeBlockKind(blockGate(), blockReport())).toBeNull();
+    expect(judgeBlockKind(blockGate(), null)).toBeNull();
+  });
+  it("names a merge conflict, failing checks and a broken link", () => {
+    expect(judgeBlockKind(blockGate(), blockReport({ mergeable: false }))).toBe("merge_conflict");
+    expect(judgeBlockKind(blockGate(), blockReport({ checks: "failing" }))).toBe("deployment_verification");
+    expect(judgeBlockKind(blockGate({ broken: "other_repository" }), blockReport())).toBe("pull_request");
+  });
+  it("waits for a fresh report before blocking on a stale one", () => {
+    expect(judgeBlockKind(blockGate({ needsReport: true }), blockReport({ mergeable: false }))).toBeNull();
+  });
+});
+
+describe("durable PR review offer expiry (#592)", () => {
+  beforeEach(() => {
+    db.reviewOffer.findMany.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => {
+      if (Array.isArray(where.OR)) {
+        const now = Date.now();
+        return state.reviewOffers
+          .filter((offer) =>
+            (offer.status === "offered" && now - offer.offeredAt.getTime() >= REVIEW_OFFER_TTL_MS) ||
+            (offer.status === "accepted" && (offer.deadlineAt === null || offer.deadlineAt.getTime() <= now)),
+          )
+          .map(({ id }) => ({ id }));
+      }
+      if (where.status && typeof where.status === "object" && "in" in where.status) {
+        const statuses = (where.status as { in: string[] }).in;
+        return state.reviewOffers
+          .filter((offer) => statuses.includes(offer.status))
+          .map(({ beneficiaryUserId, status, offeredAt, deadlineAt }) => ({ beneficiaryUserId, status, offeredAt, deadlineAt }));
+      }
+      if (where.beneficiaryUserId) {
+        return state.reviewOffers.map(({ beneficiaryUserId, offeredAt }) => ({ beneficiaryUserId, offeredAt }));
+      }
+      return [];
+    });
+    db.reviewOffer.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      const row = state.reviewOffers.find((offer) => offer.id === where.id);
+      return row ? { ...row } : null;
+    });
+    db.reviewOffer.updateMany.mockImplementation(async ({ where, data }: {
+      where: { id: string; status: string };
+      data: Partial<(typeof state.reviewOffers)[number]>;
+    }) => {
+      const row = state.reviewOffers.find((offer) => offer.id === where.id && offer.status === where.status);
+      if (!row) return { count: 0 };
+      Object.assign(row, data);
+      return { count: 1 };
+    });
+  });
+
+  it("expires persisted offered and accepted rows once after their in-process timers are gone", async () => {
+    const now = Date.now();
+    state.reviewOffers = [
+      {
+        id: "offered-during-restart", bugId: "bug1", beneficiaryUserId: "reviewer-1", agentId: "agent-1",
+        status: "offered", offeredAt: new Date(now - REVIEW_OFFER_TTL_MS - 1), deadlineAt: null,
+        pullRequestUrl: PR, headSha: "head1",
+      },
+      {
+        id: "accepted-during-restart", bugId: "bug1", beneficiaryUserId: "reviewer-2", agentId: "agent-2",
+        status: "accepted", offeredAt: new Date(now - REVIEW_OFFER_TTL_MS * 2), deadlineAt: new Date(now - REVIEW_DEADLINE_MS - 1),
+        pullRequestUrl: PR, headSha: "head1",
+      },
+    ];
+    db.bug.findFirst.mockResolvedValue(bugRow({ status: "closed" }));
+
+    await expect(sweepReviewOffers()).resolves.toEqual({ expired: 2 });
+    expect(state.reviewOffers.map(({ status }) => status)).toEqual(["expired", "expired"]);
+    await expect(sweepReviewOffers()).resolves.toEqual({ expired: 0 });
+  });
+
+  it("offers a replacement reviewer as part of the durable expiry transition", async () => {
+    state.reviewOffers = [{
+      id: "expired-accepted", bugId: "bug1", beneficiaryUserId: "reviewer-1", agentId: "agent-1",
+      status: "accepted", offeredAt: new Date(Date.now() - REVIEW_OFFER_TTL_MS * 2),
+      deadlineAt: new Date(Date.now() - REVIEW_DEADLINE_MS - 1), pullRequestUrl: PR, headSha: "head1",
+    }];
+    db.membership.findMany.mockResolvedValue([
+      { userId: "reviewer-2", user: { agents: [{ id: "agent-2" }] } },
+    ]);
+
+    await expect(sweepReviewOffers()).resolves.toEqual({ expired: 1 });
+    expect(state.reviewOffers.map(({ status }) => status)).toEqual(["expired", "offered"]);
+    expect(db.reviewOffer.create).toHaveBeenCalledTimes(1);
+    await expect(sweepReviewOffers()).resolves.toEqual({ expired: 0 });
+    expect(db.reviewOffer.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("late review-offer acceptance commits expiry (#532)", () => {
+  function useRollbackAwareTransactions() {
+    db.$transaction.mockImplementation(async (run: (tx: unknown) => unknown) => {
+      const snapshot = {
+        reviewOffers: structuredClone(state.reviewOffers),
+        jobReviewOffers: structuredClone(state.jobReviewOffers),
+      };
+      try {
+        return await run(db);
+      } catch (error) {
+        state.reviewOffers = snapshot.reviewOffers;
+        state.jobReviewOffers = snapshot.jobReviewOffers;
+        throw error;
+      }
+    });
+  }
+
+  it("keeps a PR offer expired and reoffers only once across repeated late accepts", async () => {
+    const expiredOffer = {
+      id: "late-pr-offer",
+      bugId: "bug1",
+      beneficiaryUserId: "reviewer-owner-1",
+      agentId: "reviewer-agent-1",
+      status: "offered",
+      offeredAt: new Date(Date.now() - REVIEW_OFFER_TTL_MS - 1),
+      deadlineAt: null,
+      pullRequestUrl: PR,
+      headSha: "head1",
+    };
+    state.reviewOffers = [expiredOffer];
+    db.reviewOffer.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      const row = state.reviewOffers.find((offer) => offer.id === where.id);
+      return row ? { ...row, bug: bugRow({ organisationId: "organisation_zedu", projectId: "project1" }) } : null;
+    });
+    db.reviewOffer.updateMany.mockImplementation(async ({ where, data }: {
+      where: { id: string; status: string };
+      data: Partial<(typeof state.reviewOffers)[number]>;
+    }) => {
+      const row = state.reviewOffers.find((offer) => offer.id === where.id && offer.status === where.status);
+      if (!row) return { count: 0 };
+      Object.assign(row, data);
+      return { count: 1 };
+    });
+    db.reviewOffer.findMany.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => {
+      let offers = state.reviewOffers;
+      const statusFilter = where.status;
+      if (typeof statusFilter === "string") {
+        offers = offers.filter((offer) => offer.status === statusFilter);
+      } else if (statusFilter && typeof statusFilter === "object" && "in" in statusFilter) {
+        const statuses = (statusFilter as { in?: unknown }).in;
+        if (Array.isArray(statuses)) offers = offers.filter((offer) => statuses.includes(offer.status));
+      }
+      const beneficiaries = where.beneficiaryUserId as { in?: string[] } | undefined;
+      if (beneficiaries?.in) offers = offers.filter((offer) => beneficiaries.in!.includes(offer.beneficiaryUserId));
+      return offers.map(({ beneficiaryUserId, status, offeredAt, deadlineAt }) => ({ beneficiaryUserId, status, offeredAt, deadlineAt }));
+    });
+    db.membership.findMany.mockResolvedValue([
+      { userId: "reviewer-owner-2", user: { agents: [{ id: "reviewer-agent-2" }] } },
+    ]);
+    useRollbackAwareTransactions();
+
+    const agent = reviewer("reviewer-agent-1", "reviewer-owner-1");
+    await expect(acceptReviewOffer(agent, expiredOffer.id)).rejects.toMatchObject({ status: 410 });
+    expect(state.reviewOffers.map(({ status }) => status)).toEqual(["expired", "offered"]);
+
+    await expect(acceptReviewOffer(agent, expiredOffer.id)).rejects.toMatchObject({ status: 410 });
+    expect(state.reviewOffers.map(({ status }) => status)).toEqual(["expired", "offered"]);
+    expect(db.reviewOffer.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.reviewOffer.create).toHaveBeenCalledTimes(1);
+    expect(db.agentEvent.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a job offer expired and creates no duplicate replacement on repeated late accepts", async () => {
+    const expiredOffer = {
+      id: "late-job-offer",
+      submissionId: "submission1",
+      agentId: "reviewer-agent-1",
+      beneficiaryUserId: "reviewer-owner-1",
+      status: "offered",
+      offeredAt: new Date(Date.now() - REVIEW_OFFER_TTL_MS - 1),
+    };
+    const submission = {
+      id: "submission1",
+      jobId: "job1",
+      agentId: "submitter-agent",
+      beneficiaryUserId: "submitter-owner",
+      reviewsNeeded: 1,
+      status: "pending",
+      job: { id: "job1", organisationId: "organisation_zedu", projectId: "project1", pointsPerAccepted: 1 },
+    };
+    state.jobReviewOffers = [expiredOffer];
+    db.jobReviewOffer.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      const row = state.jobReviewOffers.find((offer) => offer.id === where.id);
+      return row ? { ...row, submission: { id: submission.id, job: { organisationId: "organisation_zedu" } } } : null;
+    });
+    db.jobReviewOffer.updateMany.mockImplementation(async ({ where, data }: {
+      where: { id: string; status: string };
+      data: Partial<(typeof state.jobReviewOffers)[number]>;
+    }) => {
+      const row = state.jobReviewOffers.find((offer) => offer.id === where.id && offer.status === where.status);
+      if (!row) return { count: 0 };
+      Object.assign(row, data);
+      return { count: 1 };
+    });
+    db.jobReviewOffer.findMany.mockImplementation(async ({ where }: { where: { submissionId: string } }) =>
+      state.jobReviewOffers
+        .filter((offer) => offer.submissionId === where.submissionId)
+        .map(({ beneficiaryUserId, status }) => ({ beneficiaryUserId, status })),
+    );
+    db.jobReviewOffer.create.mockImplementation(async ({ data }: { data: Omit<(typeof state.jobReviewOffers)[number], "id"> }) => {
+      const row = { id: `job-review-${state.jobReviewOffers.length + 1}`, ...data };
+      state.jobReviewOffers.push(row);
+      return row;
+    });
+    db.jobReview.findMany.mockResolvedValue([]);
+    db.jobSubmission.findUnique.mockResolvedValue(submission);
+    db.membership.findMany.mockResolvedValue([
+      { userId: "reviewer-owner-2", user: { agents: [{ id: "reviewer-agent-2" }] } },
+    ]);
+    useRollbackAwareTransactions();
+
+    const agent = reviewer("reviewer-agent-1", "reviewer-owner-1");
+    await expect(acceptJobReviewOffer(agent, expiredOffer.id)).rejects.toMatchObject({ status: 410 });
+    expect(state.jobReviewOffers.map(({ status }) => status)).toEqual(["expired", "offered"]);
+
+    await expect(acceptJobReviewOffer(agent, expiredOffer.id)).rejects.toMatchObject({ status: 410 });
+    expect(state.jobReviewOffers.map(({ status }) => status)).toEqual(["expired", "offered"]);
+    expect(db.jobReviewOffer.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.jobReviewOffer.create).toHaveBeenCalledTimes(1);
+    expect(db.agentEvent.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("deeper testing: what counts (#deeper-testing)", () => {
+  const rules: ProofRules = {
+    rules: [
+      { id: "every", projectId: null, issueTypeId: null, projectAreaId: null, checks: ["fixed"] },
+      { id: "fix", projectId: null, issueTypeId: "type-fix", projectAreaId: null, checks: ["repro"] },
+      { id: "web", projectId: "p1", issueTypeId: null, projectAreaId: "area-web", checks: ["phone", "guide"] },
+    ],
+    custom: [{ id: "guide", name: "Keyboard only", instructions: "Tab through it.", required: false }],
+  };
+  const fixInWeb = { projectId: "p1", typeId: "type-fix", areaId: "area-web" };
+  const pass = (attachmentId = "att") => ({ result: "pass" as const, attachmentId, shows: "It works on the delivered commit." });
+
+  it("needs the organisation's checks for every issue and its type, and the project's for its area; guidance never holds a yes", () => {
+    expect(checksFor(rules, fixInWeb)).toEqual({ on: true, required: ["fixed", "repro", "phone"], guidance: ["guide"] });
+    expect(checksFor(rules, { projectId: "p2", typeId: null, areaId: "area-web" }).required).toEqual(["fixed"]);
+    expect(checksFor({ rules: [], custom: [] }, fixInWeb)).toEqual({ on: false, required: [], guidance: [] });
+  });
+
+  it("counts every judgement, as before, where the organisation has no checks", () => {
+    expect(countsWithProof({ goodToMerge: true, headSha: "abc1234", proof: null }, NO_CHECKS, "abc1234")).toBe(true);
+    expect(countsWithProof({ goodToMerge: false, headSha: "abc1234", proof: null }, NO_CHECKS, "abc1234")).toBe(true);
+  });
+
+  it("counts a good-to-merge only with proof for every required check, on the delivered commit", () => {
+    const checks = checksFor(rules, fixInWeb);
+    const full = { checks: { fixed: pass(), repro: pass(), phone: { result: "na", reason: "No phone layout changed." } } };
+    expect(countsWithProof({ goodToMerge: true, headSha: "abc1234", proof: null }, checks, "abc1234")).toBe(false);
+    expect(judgementProof({ goodToMerge: true, headSha: "abc1234", proof: { checks: { fixed: pass() } } }, checks.required, "abc1234")).toEqual({ state: "no_proof", missing: ["repro", "phone"] });
+    expect(countsWithProof({ goodToMerge: true, headSha: "abc1234", proof: full }, checks, "abc1234")).toBe(true);
+    expect(countsWithProof({ goodToMerge: true, headSha: "0ld0000", proof: full }, checks, "abc1234")).toBe(false);
+  });
+
+  it("counts a not-good-to-merge only with proof of what fails, and never a yes that proves a fail", () => {
+    const checks = checksFor(rules, fixInWeb);
+    const fails = { checks: { phone: { result: "fail", attachmentId: "att", shows: "It fails on the delivered commit." } } };
+    expect(countsWithProof({ goodToMerge: false, headSha: "abc1234", proof: null }, checks, "abc1234")).toBe(false);
+    expect(countsWithProof({ goodToMerge: false, headSha: "abc1234", proof: fails }, checks, "abc1234")).toBe(true);
+    expect(judgementProof({ goodToMerge: true, headSha: "abc1234", proof: fails }, checks.required, "abc1234").state).toBe("contradicts");
+  });
+
+  it("holds the issue while a square is unproven or proven to fail; risky rows need two; routed and benched rows never hold it", () => {
+    const row = (id: string, extra: Partial<{ envs: string[]; needsTwo: boolean; source: "criteria" | "beyond"; route: "ci" | "env" }> = {}) => ({
+      id,
+      text: id,
+      why: null,
+      kind: null,
+      proof: "screen" as const,
+      envs: [],
+      needsTwo: false,
+      source: "criteria" as const,
+      route: null,
+      proofAttachmentId: null,
+      decision: null,
+      agent: null,
+      ...extra,
+    });
+    const card = (verdicts: { id: string; proof: unknown }[], priority = "high") =>
+      buildCard({
+        rules,
+        checks: { on: true, required: ["fixed"], guidance: [] },
+        priority,
+        deliveredSha: "abc1234",
+        receipt: null,
+        rows: [row("r1", { envs: ["Phone", "Desktop"] }), row("r2", { needsTwo: true }), row("r3", { route: "env" })],
+        verdicts: verdicts.map((v) => ({ ...v, agent: { name: v.id }, goodToMerge: true, headSha: "abc1234" })),
+      });
+    expect(card([]).holes).toBe(4); // the check, two squares of r1, r2
+    const proven = { checks: { fixed: pass() }, squares: { "r1@Phone": pass(), "r1@Desktop": pass(), r2: pass() } };
+    expect(card([{ id: "Ivy", proof: proven }]).holes).toBe(1); // r2 needs a second tester
+    expect(card([{ id: "Ivy", proof: proven }, { id: "Fern", proof: { squares: { r2: pass() } } }]).holes).toBe(0);
+    expect(card([{ id: "Ivy", proof: { ...proven, squares: { ...proven.squares, "r1@Phone": { result: "fail", attachmentId: "att", shows: "It fails on the delivered commit." } } } }]).failed).toBe(1);
+    // #921: a judgement sent with the full ID of the short delivered commit is on the same code.
+    const full = "abc1234def5678abc1234def5678abc1234def56";
+    const onFull = buildCard({
+      rules,
+      checks: { on: true, required: ["fixed"], guidance: [] },
+      priority: "high",
+      deliveredSha: "abc1234",
+      receipt: null,
+      rows: [row("r1", { envs: ["Phone", "Desktop"] }), row("r2", { needsTwo: true }), row("r3", { route: "env" })],
+      verdicts: [{ id: "Ivy", proof: proven, agent: { name: "Ivy" }, goodToMerge: true, headSha: full }],
+    });
+    expect(onFull.holes).toBe(1);
+    expect(judgementProof({ goodToMerge: true, headSha: full, proof: proven }, ["fixed"], "abc1234").state).not.toBe("earlier_code");
+    expect(judgementProof({ goodToMerge: true, headSha: "fedcba98", proof: proven }, ["fixed"], "abc1234").state).toBe("earlier_code");
+
+    const wild = Array.from({ length: 8 }, (_, i) => row(`w${i}`, { source: "beyond" }));
+    const low = buildCard({ rules, checks: { on: true, required: [], guidance: [] }, priority: "low", deliveredSha: null, receipt: null, rows: wild, verdicts: [] });
+    expect(low.rows.filter((r) => r.bench)).toHaveLength(2); // a low-priority card holds 6 squares
+    expect(low.holes).toBe(6);
+    // Criteria rows too: an author's 12 rows across 4 environments still hold no more than the card's size.
+    const crit = Array.from({ length: 12 }, (_, i) => row(`c${i}`, { source: "criteria", envs: ["A", "B", "C", "D"] }));
+    expect(buildCard({ rules, checks: { on: true, required: [], guidance: [] }, priority: "urgent", deliveredSha: null, receipt: null, rows: crit, verdicts: [] }).holes).toBe(12);
+  });
+});
+
+describe("deeper testing: proof is your own (#deeper-testing)", () => {
+  const pass = (attachmentId: string) => ({ result: "pass" as const, attachmentId, shows: "It works on the delivered commit." });
+
+  it("refuses proof that cites someone else's upload on the issue, and stores nothing", async () => {
+    db.attachment.updateMany.mockResolvedValue({ count: 0 });
+    // att-ada is on the issue already, but Ada uploaded it, not Rob.
+    db.attachment.findMany.mockImplementation(async ({ where }: { where: { uploaderId?: string } }) => (where.uploaderId === "rob" ? [] : [{ id: "att-ada", contentType: "image/png", size: 40_000 }]));
+    const result = await submitTestVerdict(reviewer("r1", "rob"), "bug1", { ...good, proof: { checks: { fixed: pass("att-ada") } } });
+    expect(result).toMatchObject({ status: 400, error: "invalid_request", field: "proof" });
+    expect(db.attachment.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ uploaderId: "rob" }) }));
+    expect(state.verdicts).toHaveLength(0);
+  });
+
+  it("doesn't let the card's author rate its own card", async () => {
+    db.testCardRow.findFirst.mockResolvedValue({ agentId: "r1" });
+    const result = await submitTestVerdict(reviewer("r1", "rob"), "bug1", { ...good, proof: { rating: "thorough" } });
+    expect(result).toMatchObject({ status: 400, field: "proof" });
+    expect(state.verdicts).toHaveLength(0);
+  });
+});
+
+describe("deeper testing: nobody buries or dodges a card (#deeper-testing)", () => {
+  const delivered = bugRow({ track: "product", priority: "high", typeId: null, areaId: null, claims: [] });
+  const wildRow = { text: "Two tabs at once", source: "beyond", kind: "two_at_once" };
+  const refusal = (promise: Promise<unknown>) => promise.then(() => null, (error: { status: number; body: { error: string } }) => ({ status: error.status, error: error.body.error }));
+
+  beforeEach(() => {
+    db.bug.findFirst.mockResolvedValue(delivered);
+    db.proofRule.findMany.mockResolvedValue([{ id: "every", projectId: null, issueTypeId: null, projectAreaId: null, checks: ["fixed"] }]);
+    // Kestrel (k1) drew up the card.
+    db.testCardRow.findFirst.mockImplementation(async ({ where }: { where: { id?: string } }) => (where.id ? { id: where.id, text: "Keyboard open", route: null, agentId: "k1" } : { agentId: "k1" }));
+    db.testCardRow.count.mockResolvedValue(0);
+  });
+  afterEach(() => db.proofRule.findMany.mockImplementation(async () => []));
+
+  it("lets only the card's author write criteria rows; others add wild rows", async () => {
+    expect(await refusal(addTestCardRows(reviewer("f1", "fay"), "bug1", { rows: [{ text: "Composer stays up", source: "criteria" }] }))).toEqual({ status: 403, error: "not_card_author" });
+    expect(db.testCardRow.createMany).not.toHaveBeenCalled();
+  });
+
+  it("caps the rows one tester adds, so nobody buries an issue in squares", async () => {
+    db.testCardRow.count.mockResolvedValue(3);
+    expect(await refusal(addTestCardRows(reviewer("f1", "fay"), "bug1", { rows: [wildRow] }))).toEqual({ status: 409, error: "too_many_rows" });
+    expect(db.testCardRow.createMany).not.toHaveBeenCalled();
+  });
+
+  it("doesn't let a tester route away a row someone else wrote", async () => {
+    expect(await refusal(actOnTestCardRow(reviewer("f1", "fay"), "bug1", "row1", { action: "cant_prove" }))).toEqual({ status: 403, error: "not_row_author" });
+    expect(db.testCardRow.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("deeper testing: a file must show what it proves (#deeper-testing)", () => {
+  const FILES: Record<string, { contentType: string; size: number }> = {
+    shot: { contentType: "image/png", size: 48_000 },
+    blank: { contentType: "image/png", size: 70 },
+    log: { contentType: "text/plain", size: 900 },
+  };
+  const lookup = { file: (id: string) => FILES[id], rowProof: (id: string) => (id === "race" ? ("test" as const) : undefined), changed: ["tests/composer.test.ts"] };
+  const entry = (attachmentId: string, test?: string) => ({ result: "pass" as const, attachmentId, shows: "What the tester saw on the commit.", test });
+
+  it("takes a real screenshot for what you see, and a test's output with its file for a test", () => {
+    expect(proofProblem({ checks: { phone: entry("shot"), regression: entry("log", "tests/composer.test.ts") }, squares: { race: entry("log", "tests/composer.test.ts") } }, lookup)).toBeNull();
+  });
+
+  it("refuses a blank image, a picture of a test, a log for a screenshot, and a test that isn't among the changed files", () => {
+    expect(proofProblem({ checks: { phone: entry("blank") } }, lookup)).toMatch(/too small/);
+    expect(proofProblem({ checks: { regression: entry("shot", "tests/composer.test.ts") } }, lookup)).toMatch(/picture can't prove a test/);
+    expect(proofProblem({ squares: { "race@Phone": entry("shot") } }, lookup)).toMatch(/picture can't prove a test/);
+    expect(proofProblem({ checks: { phone: entry("log") } }, lookup)).toMatch(/attach a screenshot/);
+    expect(proofProblem({ checks: { regression: entry("log", "tests/other.test.ts") } }, lookup)).toMatch(/name the test/);
   });
 });

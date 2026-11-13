@@ -9,7 +9,7 @@ export const statuses = ["open", "in_progress", "done", "merge", "resolved", "cl
 export const statusSchema = z.enum(statuses);
 
 /** The step within a main status (#substatus, lib/issue-substatus.ts). */
-export const substatuses = ["requires_confirmation", "open", "plan_review", "in_progress", "requires_review", "accepted", "ready_to_merge", "error", "on_dev", "on_staging", "on_prod", "published", "closed"] as const;
+export const substatuses = ["requires_confirmation", "open", "plan_review", "in_progress", "requires_review", "accepted", "ready_to_merge", "error", "on_dev", "on_staging", "on_prod", "published", "force_merged", "merged_broken", "closed"] as const;
 
 export const substatusSchema = z.enum(substatuses);
 
@@ -80,6 +80,7 @@ export const createBugSchema = z
     assigneeId: userIdSchema.optional().or(z.literal("")),
     areaId: z.string().optional().or(z.literal("")),
     proofLinks: proofLinksInputSchema,
+    priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
   })
   .strict();
 
@@ -88,6 +89,7 @@ export const updateBugSchema = z.object({
   typeId: z.string().nullable().optional().or(z.literal("")),
   assigneeId: userIdSchema.nullable().optional().or(z.literal("")),
   areaId: z.string().nullable().optional().or(z.literal("")),
+  priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
 });
 
 export const editBugContentSchema = z
@@ -204,6 +206,15 @@ export const commentSchema = z.object({
     .max(191)
     .optional()
     .transform((value) => (value && value.length > 0 ? value : undefined)),
+});
+
+const RETEST_OPERATING_SYSTEMS = ["Windows", "macOS", "Linux", "ChromeOS", "iOS", "Android", "Other", "Not sure"] as const;
+
+/** A guided report of a problem that continues after an issue went Live. */
+export const retestRequestSchema = z.object({
+  operatingSystem: z.enum(RETEST_OPERATING_SYSTEMS, { error: "Choose an operating system or Not sure." }),
+  installedVersion: z.string().trim().max(80, "Version must be 80 characters or fewer.").optional().transform((value) => value || "Unknown"),
+  currentBehavior: z.string().trim().min(10, "Describe what happens now in at least 10 characters.").max(4000, "Keep the description under 4,000 characters."),
 });
 
 export const loginSchema = z.object({

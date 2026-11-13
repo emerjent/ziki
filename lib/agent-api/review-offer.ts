@@ -48,18 +48,6 @@ export function rankReviewOfferCandidates<T extends ReviewOfferCandidate>(candid
   );
 }
 
-function scheduleReviewOfferExpiry(offerId: string, ttlMs = REVIEW_OFFER_TTL_MS): void {
-  setTimeout(() => {
-    void expireReviewOffer(offerId).catch(() => undefined);
-  }, ttlMs);
-}
-
-function scheduleReviewDeadlineExpiry(offerId: string, deadlineMs = REVIEW_DEADLINE_MS): void {
-  setTimeout(() => {
-    void expireReviewOffer(offerId).catch(() => undefined);
-  }, deadlineMs);
-}
-
 const bugReviewSelect = {
   id: true,
   organisationId: true,
@@ -105,6 +93,7 @@ async function findEligibleReviewerCandidates(
           some: {
             ...activeIn(organisationId),
             revokedAt: null,
+            pausedAt: null,
           },
         },
       },
@@ -117,6 +106,7 @@ async function findEligibleReviewerCandidates(
             where: {
               ...activeIn(organisationId),
               revokedAt: null,
+              pausedAt: null,
             },
             orderBy: { createdAt: "asc" },
             take: 1,
@@ -301,7 +291,6 @@ export async function createReviewOffers(
       },
     });
 
-    scheduleReviewOfferExpiry(offer.id);
     createdOffers.push(offer);
   }
 
@@ -313,37 +302,46 @@ export async function createReviewOffers(
  * Sets status to "accepted" and establishes the review deadline (default 30 min).
  */
 export async function acceptReviewOffer(agent: AgentContext, offerId: string) {
-  return prisma.$transaction(async (tx) => {
-    const offer = await tx.reviewOffer.findUnique({
+  const result = await prisma.$transaction(async (tx) => {
+    const initial = await tx.reviewOffer.findUnique({
       where: { id: offerId },
       include: {
         bug: { select: bugReviewSelect },
       },
     });
 
-    if (!offer || offer.bug.organisationId !== agent.organisationId) {
+    if (!initial || initial.bug.organisationId !== agent.organisationId) {
       throw new IssueApiError(404, "Review offer not found.");
     }
 
+    if (initial.agentId !== agent.agentId) {
+      throw new IssueApiError(409, "This review offer was made to another agent.");
+    }
+
+    await tx.$queryRaw`SELECT "id" FROM "Bug" WHERE "id" = ${initial.bugId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT "id" FROM "ReviewOffer" WHERE "id" = ${offerId} FOR UPDATE`;
+
+    const offer = await tx.reviewOffer.findUnique({
+      where: { id: offerId },
+      include: { bug: { select: bugReviewSelect } },
+    });
+    if (!offer || offer.bug.organisationId !== agent.organisationId) {
+      throw new IssueApiError(404, "Review offer not found.");
+    }
     if (offer.agentId !== agent.agentId) {
       throw new IssueApiError(409, "This review offer was made to another agent.");
     }
 
     const now = new Date();
-    if (offer.status === "expired" || isReviewOfferExpired(offer.offeredAt, now.getTime())) {
-      if (offer.status !== "expired") {
-        await tx.reviewOffer.update({
-          where: { id: offer.id },
-          data: { status: "expired", expiredAt: now },
-        });
-        // Re-offer to the next eligible reviewer
-        void reofferReview(offer.bugId, offer.pullRequestUrl, offer.headSha).catch(() => undefined);
-      }
-      throw new IssueApiError(410, "This review offer expired.");
-    }
+    if (offer.status === "expired") throw new IssueApiError(410, "This review offer expired.");
 
     if (offer.status !== "offered") {
       throw new IssueApiError(409, `This review offer is already ${offer.status}.`);
+    }
+
+    if (isReviewOfferExpired(offer.offeredAt, now.getTime())) {
+      await expireReviewOfferInTransaction(tx, offer.id);
+      return { expired: true as const };
     }
 
     const conflict = reviewerConflict({ id: agent.agentId, ownerUserId: agent.ownerId }, offer.bug);
@@ -359,9 +357,11 @@ export async function acceptReviewOffer(agent: AgentContext, offerId: string) {
       },
     });
 
-    scheduleReviewDeadlineExpiry(updated.id);
-    return { offer: updated };
+    return { expired: false as const, offer: updated };
   });
+
+  if (result.expired) throw new IssueApiError(410, "This review offer expired.");
+  return { offer: result.offer };
 }
 
 /**
@@ -439,60 +439,93 @@ export async function reofferReview(
     },
   });
 
-  scheduleReviewOfferExpiry(newOffer.id);
   return newOffer;
 }
 
+async function expireReviewOfferInTransaction(
+  tx: Prisma.TransactionClient,
+  offerId: string,
+): Promise<boolean> {
+  const initial = await tx.reviewOffer.findUnique({
+    where: { id: offerId },
+    select: { id: true, bugId: true },
+  });
+  if (!initial) return false;
+
+  // Serialize expiry and replacement creation per issue across cron instances.
+  await tx.$queryRaw`SELECT "id" FROM "Bug" WHERE "id" = ${initial.bugId} FOR UPDATE`;
+  await tx.$queryRaw`SELECT "id" FROM "ReviewOffer" WHERE "id" = ${offerId} FOR UPDATE`;
+
+  const offer = await tx.reviewOffer.findUnique({
+    where: { id: offerId },
+    select: {
+      id: true,
+      bugId: true,
+      status: true,
+      offeredAt: true,
+      deadlineAt: true,
+      pullRequestUrl: true,
+      headSha: true,
+    },
+  });
+  if (!offer) return false;
+
+  // Start the deadline check after acquiring both locks so a long lock wait
+  // cannot defer a row that became due while this transaction was waiting.
+  const now = new Date();
+  const isOfferDue = offer.status === "offered" && isReviewOfferExpired(offer.offeredAt, now.getTime());
+  const isDeadlineDue = offer.status === "accepted" && isReviewDeadlineExpired(offer.deadlineAt, now.getTime());
+  if (!isOfferDue && !isDeadlineDue) return false;
+
+  const dueWhere: Prisma.ReviewOfferWhereInput = isOfferDue
+    ? { status: "offered", offeredAt: { lte: new Date(now.getTime() - REVIEW_OFFER_TTL_MS) } }
+    : {
+        status: "accepted",
+        OR: [{ deadlineAt: { lte: now } }, { deadlineAt: null }],
+      };
+  const updated = await tx.reviewOffer.updateMany({
+    where: { id: offer.id, ...dueWhere },
+    data: { status: "expired", expiredAt: now },
+  });
+  if (!updated.count) return false;
+
+  // Keep replacement creation and its event atomic with expiry so a failed
+  // publish is retried by the next durable sweep instead of losing the review.
+  await reofferReview(offer.bugId, offer.pullRequestUrl, offer.headSha, tx);
+  return true;
+}
+
 /**
- * Handles expiration of a pending or accepted review offer (#597).
- * Re-offers the review task to the next eligible independent reviewer.
+ * Expires a due review offer and creates its replacement atomically (#592).
+ * The database row locks and conditional update make concurrent sweeps safe.
  */
 export async function expireReviewOffer(offerId: string): Promise<boolean> {
-  const result = await prisma.$transaction(async (tx) => {
-    const offer = await tx.reviewOffer.findUnique({
-      where: { id: offerId },
-      select: {
-        id: true,
-        bugId: true,
-        status: true,
-        offeredAt: true,
-        deadlineAt: true,
-        pullRequestUrl: true,
-        headSha: true,
-      },
-    });
+  return prisma.$transaction((tx) => expireReviewOfferInTransaction(tx, offerId));
+}
 
-    if (!offer) return false;
-
-    const now = Date.now();
-    let shouldExpire = false;
-
-    if (offer.status === "offered" && isReviewOfferExpired(offer.offeredAt, now)) {
-      shouldExpire = true;
-    } else if (offer.status === "accepted" && isReviewDeadlineExpired(offer.deadlineAt, now)) {
-      shouldExpire = true;
-    }
-
-    if (!shouldExpire) return false;
-
-    await tx.reviewOffer.update({
-      where: { id: offer.id },
-      data: { status: "expired", expiredAt: new Date() },
-    });
-
-    return {
-      bugId: offer.bugId,
-      pullRequestUrl: offer.pullRequestUrl,
-      headSha: offer.headSha,
-    };
+/**
+ * Recovers expired PR-review offers after process restarts and across instances.
+ * Unlike an in-process timer, every scheduled run reconstructs due work from
+ * persisted offer/deadline timestamps.
+ */
+export async function sweepReviewOffers(): Promise<{ expired: number }> {
+  const now = new Date();
+  const dueOffers = await prisma.reviewOffer.findMany({
+    where: {
+      OR: [
+        { status: "offered", offeredAt: { lte: new Date(now.getTime() - REVIEW_OFFER_TTL_MS) } },
+        { status: "accepted", OR: [{ deadlineAt: { lte: now } }, { deadlineAt: null }] },
+      ],
+    },
+    select: { id: true },
+    orderBy: [{ offeredAt: "asc" }, { id: "asc" }],
   });
 
-  if (result) {
-    await reofferReview(result.bugId, result.pullRequestUrl, result.headSha);
-    return true;
+  let expired = 0;
+  for (const offer of dueOffers) {
+    if (await expireReviewOffer(offer.id)) expired++;
   }
-
-  return false;
+  return { expired };
 }
 
 /**

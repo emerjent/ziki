@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentLevel, Difficulty, IdeaOpinion, Prisma, WorkTrack } from "@prisma/client";
+import type { AgentLevel, Difficulty, IdeaOpinion, Prisma, Substatus, WorkTrack } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
 import { requireLevel } from "@/lib/agents/levels";
@@ -12,18 +12,21 @@ import { calculateReporterPoints } from "@/lib/points/project-rewards";
 import { getProjectRewardConfig } from "@/lib/points/platform-rewards";
 import { workflowFor } from "@/lib/workflow";
 import { parseIssueRef } from "@/lib/issue-ref";
-import { createdSummary } from "@/lib/activity-log";
+import { assigneeChangedSummary, createdSummary, statusChangedSummary } from "@/lib/activity-log";
 import { ENTRY_SUMMARY_MAX_CHARS, entryDescription, entrySummary, sentenceCount } from "@/lib/agent-api/entry-fields";
 import { ideaVotes, isBadIdea, notRejectableReason } from "@/lib/idea-rejection";
 import { duplicateRef, IDEA_WITHDRAWN_REASON, withdrawnNotArchivableMessage, type ArchiveIdeaInput, type WithdrawIdeaInput } from "@/lib/idea-archive";
-import { WORKFLOW_LIMITS } from "@/lib/workflow-config";
+import { WORKFLOW_LIMITS, type ProjectWorkflowValues } from "@/lib/workflow-config";
 import { isThresholdOnly, thresholdDecision, voteWeight, type ThresholdDecision } from "@/lib/governance";
 
 /** Recorded on a conversion that skipped the verdicts because the person who filed the idea said it was already vetted. */
-export type VettedDecision = { via: "already_vetted"; decidedByUserId: string; decidedByAgentId: string; vettedNote: string };
+export type VettedDecision = { via: "already_vetted"; decidedByUserId: string; decidedByAgentId: string | null; vettedNote: string };
 import { moveTo } from "@/lib/issue-substatus";
 import { dropIdeaStakes, moveIdeaStakesToIssue } from "@/lib/agent-api/stakes";
 import { trackRules } from "@/lib/marketing/track";
+import { assertUnderCapacity, isAtCapacityError } from "@/lib/agent-api/capacity";
+import { deliveryDeadline, deliveryWindowMinutes } from "@/lib/claim-deadline";
+import { needsPlanReview } from "@/lib/difficulty";
 
 /**
  * Idea verdicts and conversion (#idea-verdicts, #idea-table). Each person
@@ -89,6 +92,7 @@ type LockedIdea = {
   projectId: string;
   status: string;
   track: WorkTrack;
+  source: string;
   score: number;
   reporterId: string;
   beneficiaryUserId: string;
@@ -103,7 +107,7 @@ async function lockedIdea(tx: Tx, scope: Scope, ref: string): Promise<LockedIdea
   const byNumber = parsed.kind === "number" ? parsed.number : null;
   const byId = parsed.kind === "id" ? parsed.id : null;
   const rows = await tx.$queryRaw<LockedIdea[]>`
-    SELECT i."id", i."number", i."organisationId", i."projectId", i."status"::text AS "status", i."track"::text AS "track", i."score",
+    SELECT i."id", i."number", i."organisationId", i."projectId", i."status"::text AS "status", i."track"::text AS "track", i."source", i."score",
            i."reporterId", i."beneficiaryUserId", a."ownerUserId" AS "createdByOwnerId"
     FROM "Idea" i
     LEFT JOIN "Agent" a ON a."id" = i."createdByAgentId"
@@ -371,19 +375,91 @@ export async function convertIdea(agent: AgentContext, projectId: string, ideaRe
 }
 
 /**
- * Already vetted (#stakes fast lane): the person who filed the idea says it was
- * vetted elsewhere, so it becomes an issue at once, in the transaction that
- * creates it, without waiting for verdicts. Only the verdicts are skipped: the
- * issue is still confirmed on its own. The note says where it was approved; it
- * is shown on the issue's activity and kept on the event and the audit log.
+ * Already vetted (#vetted-start-now): the person who filed the idea says it was
+ * vetted elsewhere (an internal dev's own task, for example), so it skips the
+ * queue. In the transaction that creates the idea it becomes an issue that
+ * counts as confirmed (`vettedAt`), and the agent that filed it holds it at
+ * once: In progress with an active claim, with no confirmation, bid, award or
+ * offer to wait for. A complex issue opens plan review for the agent's owner
+ * instead. Everything from delivery on (testing, review, merge) is unchanged,
+ * and points are paid as for any other issue. The note says where it was
+ * approved; it is shown on the issue's activity and kept on the event and the
+ * audit log. The owner's capacity still applies: at capacity, nothing is filed.
  */
 export async function convertVettedIdea(tx: Tx, agent: AgentContext, projectId: string, ideaId: string, vettedNote: string, difficulty: Difficulty) {
   const scope = { organisationId: agent.organisationId, projectId };
-  const { ideaThreshold } = await workflowFor(projectId, tx);
+  const workflow = await workflowFor(projectId, tx);
   const locked = await lockedIdea(tx, scope, ideaId);
   assertOpenIdea(locked);
   const by = { userId: agent.ownerId, agentId: agent.agentId };
-  return convertLocked(tx, scope, locked, by, ideaThreshold, { via: "already_vetted", decidedByUserId: by.userId, decidedByAgentId: agent.agentId, vettedNote }, difficulty);
+  const converted = await convertLocked(tx, scope, locked, by, workflow.ideaThreshold, { via: "already_vetted", decidedByUserId: by.userId, decidedByAgentId: agent.agentId, vettedNote }, difficulty);
+  const held = await holdVettedIssue(tx, agent, { id: converted.issueId, projectId, from: trackRules(locked.track).convertsTo }, workflow, difficulty, new Date(converted.convertedAt));
+  return { ...converted, ...held };
+}
+
+/** A client selected this finding from an unlocked report result. Convert it as vetted
+ * without creating a claim for an agent who didn't file it. */
+export async function convertClientVettedIdea(tx: Tx, scope: Scope, ideaId: string, userId: string) {
+  const { ideaThreshold } = await workflowFor(scope.projectId, tx);
+  const locked = await lockedIdea(tx, scope, ideaId);
+  assertOpenIdea(locked);
+  return convertLocked(tx, scope, locked, { userId, agentId: null }, ideaThreshold, {
+    via: "already_vetted",
+    decidedByUserId: userId,
+    decidedByAgentId: null,
+    vettedNote: "Selected by the client from an unlocked finding on a posted security report.",
+  });
+}
+
+
+/**
+ * The filing agent takes its vetted issue (#vetted-start-now), as a winning
+ * stake does (lib/agent-api/stakes.ts): an active claim at once (its owner
+ * the assignee, In progress, the delivery clock running), or on a complex
+ * issue a planning claim and Plan review, as an award opens it.
+ */
+async function holdVettedIssue(
+  tx: Tx,
+  agent: AgentContext,
+  issue: { id: string; projectId: string; from: Substatus },
+  workflow: ProjectWorkflowValues,
+  difficulty: Difficulty,
+  at: Date,
+): Promise<{ claimId: string; claimStatus: "active" | "planning"; deliverBy: string | null }> {
+  try {
+    await assertUnderCapacity(tx, { organisationId: agent.organisationId, projectId: issue.projectId, userId: agent.ownerId }, workflow);
+  } catch (error) {
+    if (!isAtCapacityError(error)) throw error;
+    const { load, capacity } = (error as IssueApiError).body as { load: number; capacity: number };
+    const message = `Your owner already holds ${load} of ${capacity} claims and offers allowed in this project, so a vetted idea can't start now. Deliver or release one first; nothing was filed.`;
+    throw new IssueApiError(409, message, { error: "at_capacity", message, load, capacity });
+  }
+  const planning = needsPlanReview(difficulty);
+  const deliverBy = planning ? null : deliveryDeadline(at, deliveryWindowMinutes(workflow.deliveryMinutes));
+  const claim = await tx.issueClaim.create({
+    data: planning
+      ? { bugId: issue.id, beneficiaryUserId: agent.ownerId, agentId: agent.agentId, status: "planning", offeredAt: at }
+      : { bugId: issue.id, beneficiaryUserId: agent.ownerId, agentId: agent.agentId, status: "active", claimedAt: at, lastHeartbeatAt: at, deliverBy },
+    select: { id: true },
+  });
+  const to: Substatus = planning ? "plan_review" : "in_progress";
+  await tx.bug.update({ where: { id: issue.id }, data: { assigneeId: agent.ownerId, ...moveTo(to) } });
+  const owner = await tx.user.findUnique({ where: { id: agent.ownerId }, select: { name: true } });
+  await tx.bugActivity.createMany({
+    data: [
+      { bugId: issue.id, actorId: agent.ownerId, type: "assignee_changed", summary: assigneeChangedSummary(null, owner?.name ?? "the filer"), metadata: { field: "assignee", from: null, to: agent.ownerId, via: "already_vetted", claimId: claim.id } },
+      { bugId: issue.id, actorId: agent.ownerId, type: "status_changed", summary: statusChangedSummary(issue.from, to), metadata: { field: "status", from: issue.from, to, via: "already_vetted", claimId: claim.id } },
+    ],
+  });
+  await publish(tx, {
+    organisationId: agent.organisationId,
+    type: "claim.accepted",
+    actorAgentId: agent.agentId,
+    bugId: issue.id,
+    projectId: issue.projectId,
+    payload: { claimId: claim.id, issueId: issue.id, projectId: issue.projectId, beneficiaryUserId: agent.ownerId, via: "already_vetted", planning },
+  });
+  return { claimId: claim.id, claimStatus: planning ? "planning" : "active", deliverBy: deliverBy?.toISOString() ?? null };
 }
 
 /**
@@ -428,8 +504,12 @@ export async function convertLocked(
       createdByAgentId: idea.createdByAgentId,
       difficulty,
       track: locked.track,
-      ...moveTo(rules.convertsTo),
-      watches: { create: { userId: idea.reporterId } },
+      ...moveTo(decision?.via === "already_vetted" && by.agentId === null ? "open" : rules.convertsTo),
+      // #vetted-start-now: counts as confirmed (lib/issue-stage.ts).
+      ...(decision?.via === "already_vetted" ? { vettedAt: at } : {}),
+      // A guest report's synthetic reporter cannot sign in and must not become
+      // a watcher. The private tracking URL is the guest's status channel.
+      ...(locked.source === "public" ? {} : { watches: { create: { userId: idea.reporterId } } }),
       activities: {
         create: {
           actorId: idea.reporterId,
@@ -442,7 +522,8 @@ export async function convertLocked(
     },
     select: { id: true, number: true },
   });
-  if (rules.reporterPaidOn === "conversion") {
+  // A vetted issue is confirmed from the start, so its reporter is paid now on every track (#vetted-start-now).
+  if ((rules.reporterPaidOn === "conversion" || decision?.via === "already_vetted") && locked.source !== "public") {
     const reporterId = idea.beneficiaryUserId ?? idea.reporterId;
     const rewardConfig = await getProjectRewardConfig(tx, projectId);
     await award(tx, {
@@ -502,9 +583,10 @@ export async function convertLocked(
  * good ones (lib/idea-rejection.ts). It moves to Rejected ideas and takes no
  * more verdicts.
  */
-export async function rejectIdea(agent: AgentContext, projectId: string, ideaRef: string) {
+export async function rejectIdea(agent: AgentContext, projectId: string, ideaRef: string, reason?: string | null) {
   requireLevel(agent, "manager");
   const { ideaThreshold } = await workflowFor(projectId);
+  const cleanReason = reason?.trim() || null;
   const rejected = await prisma.$transaction(async (tx) => {
     const scope = { organisationId: agent.organisationId, projectId };
     const locked = await lockedIdea(tx, scope, ideaRef);
@@ -514,9 +596,13 @@ export async function rejectIdea(agent: AgentContext, projectId: string, ideaRef
       const message = notRejectableReason(votes, ideaThreshold);
       throw new IssueApiError(409, message, { error: "not_rejectable", message, totalVotes: votes.total, goodVotes: votes.good });
     }
-    return rejectLocked(tx, scope, locked, { userId: agent.ownerId, agentId: agent.agentId }, votes);
+    return rejectLocked(tx, scope, locked, { userId: agent.ownerId, agentId: agent.agentId }, votes, undefined, cleanReason);
   });
-  await audit(agent, "idea.rejected", `idea:${rejected.ideaId}`, { totalVotes: rejected.totalVotes, goodVotes: rejected.goodVotes });
+  await audit(agent, "idea.rejected", `idea:${rejected.ideaId}`, {
+    totalVotes: rejected.totalVotes,
+    goodVotes: rejected.goodVotes,
+    ...(cleanReason ? { reason: cleanReason } : {}),
+  });
   return rejected;
 }
 
@@ -532,20 +618,43 @@ async function rejectLocked(
   by: { userId: string; agentId: string | null },
   votes: { total: number; good: number },
   decision?: ThresholdDecision,
+  reason?: string | null,
 ) {
   const at = new Date();
-  await tx.idea.update({ where: { id: locked.id }, data: { status: "rejected", rejectedAt: at, rejectedByAgentId: by.agentId } });
+  await tx.idea.update({
+    where: { id: locked.id },
+    data: {
+      status: "rejected",
+      rejectedAt: at,
+      rejectedByAgentId: by.agentId,
+      ...(reason !== undefined ? { rejectReason: reason } : {}),
+    },
+  });
   await publish(tx, {
     organisationId: scope.organisationId,
     type: "idea.rejected",
     actorAgentId: by.agentId,
     projectId: scope.projectId,
     payload: {
-      ideaId: locked.id, ideaNumber: locked.number, projectId: scope.projectId, totalVotes: votes.total, goodVotes: votes.good, ideaScore: locked.score,
+      ideaId: locked.id,
+      ideaNumber: locked.number,
+      projectId: scope.projectId,
+      totalVotes: votes.total,
+      goodVotes: votes.good,
+      ideaScore: locked.score,
+      ...(reason ? { rejectReason: reason } : {}),
       ...(decision ?? {}),
     },
   });
-  return { ideaId: locked.id, ideaNumber: locked.number, status: "rejected" as const, rejectedAt: at.toISOString(), totalVotes: votes.total, goodVotes: votes.good };
+  return {
+    ideaId: locked.id,
+    ideaNumber: locked.number,
+    status: "rejected" as const,
+    rejectedAt: at.toISOString(),
+    rejectReason: reason ?? null,
+    totalVotes: votes.total,
+    goodVotes: votes.good,
+  };
 }
 
 /**

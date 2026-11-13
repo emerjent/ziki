@@ -66,7 +66,7 @@ async function findEligibleReviewers(
       organisationId,
       user: {
         agents: {
-          some: { ...activeIn(organisationId), revokedAt: null },
+          some: { ...activeIn(organisationId), revokedAt: null, pausedAt: null },
         },
       },
     },
@@ -75,7 +75,7 @@ async function findEligibleReviewers(
       user: {
         select: {
           agents: {
-            where: { ...activeIn(organisationId), revokedAt: null },
+            where: { ...activeIn(organisationId), revokedAt: null, pausedAt: null },
             orderBy: { createdAt: "asc" },
             take: 1,
             select: { id: true },

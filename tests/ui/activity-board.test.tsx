@@ -48,10 +48,13 @@ function renderBoard(data: Partial<ActivityData>) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe("ActivityBoard", () => {
   it("puts an offer waiting to be accepted first, with its countdown, and sends a nudge", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
     nudgeAgentAction.mockResolvedValue({ ok: true, at: new Date(NOW).toISOString() });
     renderBoard({ claims: [claim("offer-1", 2306, { status: "offered", offeredAt: at(-17), claimedAt: null, deliverBy: null })] });
 

@@ -29,7 +29,7 @@ function LockIcon() {
  * The private half of a security finding on its issue or idea page
  * (#security-findings). Viewers who may see it get the real title, summary,
  * description and files; everyone else gets an explanation. Owners and admins
- * can publish it early.
+ * can publish it.
  */
 export function SecurityFindingPanel({ view, canDisclose, kind }: { view: FindingView; canDisclose: boolean; kind: "issue" | "idea" }) {
   if (view.disclosed) {
@@ -41,7 +41,7 @@ export function SecurityFindingPanel({ view, canDisclose, kind }: { view: Findin
           <span>
             Disclosed{view.disclosedAt ? <> <LocalTime date={view.disclosedAt} /></> : null}. Its details are now public below.
           </span>
-          <Link href="/security" className="font-semibold text-zk-accent hover:underline">All findings</Link>
+          <Link href="/security?view=findings" className="font-semibold text-zk-accent hover:underline">All findings</Link>
         </p>
       </section>
     );
@@ -60,7 +60,7 @@ export function SecurityFindingPanel({ view, canDisclose, kind }: { view: Findin
         <div className="mt-3 space-y-2">
           <p className="text-xs text-zk-text2">
             You can see this because you reported it, administer this workspace, or are cleared for security work.
-            Everyone else sees only the placeholder until the fix is live. Don&apos;t paste these details into
+            Everyone else sees only the placeholder until authorized disclosure. Don&apos;t paste these details into
             comments on this {kind}: comments are not private.
           </p>
           <h2 className="break-words text-lg font-bold text-zk-text">{view.details.title}</h2>

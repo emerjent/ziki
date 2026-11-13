@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { audit } from "@/lib/agents/audit";
 import { publish } from "@/lib/agent-api/events";
+import { assigneeChangedSummary, statusChangedSummary } from "@/lib/activity-log";
 import { moveTo } from "@/lib/issue-substatus";
 
 /**
@@ -12,19 +13,23 @@ import { moveTo } from "@/lib/issue-substatus";
  * - reopens the issue when this was its only open claim, the same way the
  *   silence release does (a person's later reassignment or resolution is kept);
  * - withdraws the agent's bids that were never awarded;
+ * - leaves alone the issues in `keepIssueIds` (an on-call guest's just-delivered task);
  * - publishes `claim.released` and writes an audit row per claim.
  * The released issues wait in Open for bids; nobody is offered them in turn.
  */
 export async function releaseWorkOfRevokedAgent(
   tx: Prisma.TransactionClient,
-  input: { agentId: string; organisationId: string; actorUserId: string; now: Date },
+  input: { agentId: string; organisationId: string; actorUserId: string; now: Date; keepIssueIds?: readonly string[] },
 ): Promise<{
   releasedClaims: number;
   withdrawnBids: number;
 }> {
   const { agentId, organisationId, actorUserId, now } = input;
+  const keep = input.keepIssueIds?.length ? { id: { notIn: [...input.keepIssueIds] } } : {};
+  // Only this organisation's work: every caller hands back one organisation at a time, and an
+  // on-call guest leaving a client's workspace keeps its work at home.
   const open = await tx.issueClaim.findMany({
-    where: { agentId, releasedAt: null, status: { in: ["offered", "planning", "active"] } },
+    where: { agentId, releasedAt: null, status: { in: ["offered", "planning", "active"] }, bug: { organisationId, ...keep } },
     select: { id: true, bugId: true },
     orderBy: { bugId: "asc" },
   });
@@ -45,16 +50,34 @@ export async function releaseWorkOfRevokedAgent(
     const otherOpen = await tx.issueClaim.count({
       where: { bugId: claim.bugId, releasedAt: null, id: { not: claim.id } },
     });
+    const issueBefore = !otherOpen && (claim.status === "active" || claim.status === "planning")
+      ? await tx.bug.findUnique({
+          where: { id: claim.bugId },
+          select: { assigneeId: true, assignee: { select: { name: true } } },
+        })
+      : null;
     if (!otherOpen && claim.status === "active") {
-      await tx.bug.updateMany({
+      const reopened = await tx.bug.updateMany({
         // A delivered fix stays where it got to (#one-status).
         where: { id: claim.bugId, organisationId, isDeleted: false, assigneeId: claim.beneficiaryUserId, status: "in_progress", pullRequestUrl: null },
         data: { assigneeId: null, ...moveTo("open") },
       });
+      if (reopened.count) {
+        await tx.bugActivity.createMany({ data: [
+          { bugId: claim.bugId, actorId: actorUserId, type: "assignee_changed", summary: assigneeChangedSummary(issueBefore?.assignee?.name ?? null, null), metadata: { field: "assignee", from: claim.beneficiaryUserId, to: null } },
+          { bugId: claim.bugId, actorId: actorUserId, type: "status_changed", summary: statusChangedSummary("in_progress", "open"), metadata: { field: "status", from: "in_progress", to: "open" } },
+        ] });
+      }
     }
     // A plan under review goes with the claim (#plan-review): the issue is Open for bids again.
     if (!otherOpen && claim.status === "planning") {
-      await tx.bug.updateMany({ where: { id: claim.bugId, organisationId, isDeleted: false, substatus: "plan_review" }, data: { assigneeId: null, ...moveTo("open") } });
+      const reopened = await tx.bug.updateMany({ where: { id: claim.bugId, organisationId, isDeleted: false, substatus: "plan_review" }, data: { assigneeId: null, ...moveTo("open") } });
+      if (reopened.count) {
+        await tx.bugActivity.createMany({ data: [
+          ...(issueBefore?.assigneeId ? [{ bugId: claim.bugId, actorId: actorUserId, type: "assignee_changed" as const, summary: assigneeChangedSummary(issueBefore.assignee?.name ?? null, null), metadata: { field: "assignee", from: issueBefore.assigneeId, to: null } }] : []),
+          { bugId: claim.bugId, actorId: actorUserId, type: "status_changed", summary: statusChangedSummary("plan_review", "open"), metadata: { field: "status", from: "plan_review", to: "open" } },
+        ] });
+      }
     }
     await publish(tx, {
       organisationId,
@@ -72,7 +95,7 @@ export async function releaseWorkOfRevokedAgent(
   }
 
   const withdrawn = await tx.issueBid.updateMany({
-    where: { agentId, withdrawnAt: null, awardedAt: null },
+    where: { agentId, withdrawnAt: null, awardedAt: null, bug: { organisationId, ...keep } },
     data: { withdrawnAt: now },
   });
 

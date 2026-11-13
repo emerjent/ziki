@@ -30,6 +30,8 @@ const nextConfig: NextConfig = {
   },
   outputFileTracingIncludes: {
     "/llms.txt": ["./docs/ziki-for-agents.md"],
+    // The security report PDF embeds its own font (components/security-checks/report-pdf.tsx).
+    "/security/checks/[id]/report.pdf": ["./assets/fonts/**"],
   },
   async headers() {
     // #222: the app previously sent no security headers at all, which left
@@ -51,7 +53,7 @@ const nextConfig: NextConfig = {
       },
       {
         key: "Permissions-Policy",
-        value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+        value: "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
       },
       {
         key: "Content-Security-Policy",
@@ -130,6 +132,9 @@ const nextConfig: NextConfig = {
   experimental: {
     // #447: lets a page answer 403 with `forbidden()` and app/forbidden.tsx.
     authInterrupts: true,
+    serverActions: {
+      bodySizeLimit: "10mb",
+    },
   },
   webpack: (config, { nextRuntime }) => {
     // instrumentation.ts imports the ledger backfill only on Node. The edge

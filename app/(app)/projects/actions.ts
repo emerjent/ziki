@@ -11,7 +11,6 @@ import { ideasPath, orgPath, projectRef } from "@/lib/project-paths";
 import { currentOrganisationIdFor, NO_ORGANISATION_MESSAGE } from "@/lib/organisation-context";
 import { isAdminOfOrganisation } from "@/lib/agents/membership";
 import { isSuperAdmin, type AppRole } from "@/lib/roles";
-import { createMissionSchema, createTestMissions } from "@/lib/missions";
 import {
   nextProjectSlug,
   projectLinksSchema,
@@ -32,9 +31,26 @@ export type ProjectActionResult = {
   message?: string;
 };
 
-/** Back to the org's Projects page the action came from (#project-urls), with a message. */
-async function projectsMessage(key: "error" | "notice", message: string): Promise<string> {
-  const slug = await refererProjectRef();
+/**
+ * Back to the org's Projects page (#project-urls), with a message. From a
+ * project's page it is that project's; from the project's settings (no project
+ * in the address), or when that project is the one just deleted, it is the
+ * organisation's first active project's.
+ */
+async function projectsMessage(
+  key: "error" | "notice",
+  message: string,
+  place?: { organisationId: string; deletedSlug?: string },
+): Promise<string> {
+  let slug = await refererProjectRef();
+  if (place && (!slug || (place.deletedSlug && String(slug).split("/")[1] === encodeURIComponent(place.deletedSlug)))) {
+    const other = await prisma.project.findFirst({
+      where: { organisationId: place.organisationId, archivedAt: null, ...(place.deletedSlug ? { slug: { not: place.deletedSlug } } : {}) },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { slug: true, organisation: { select: { slug: true } } },
+    });
+    slug = other ? projectRef(other.organisation.slug, other.slug) : null;
+  }
   return slug ? `${orgPath(slug, "projects")}?${key}=${encodeURIComponent(message)}` : "/home";
 }
 
@@ -67,6 +83,7 @@ function projectInOrganisation(organisationId: string, projectId: string) {
     select: {
       id: true,
       name: true,
+      slug: true,
       archivedAt: true,
       _count: { select: { bugs: true } },
     },
@@ -85,6 +102,7 @@ export async function updateProjectAction(
   const visibilityRaw = (formData.get("visibility") as string | null)?.trim();
   const visibility = visibilityRaw === "public" ? "public" : "private";
   const isOpenForContributors = visibility === "public" && (formData.get("isOpenForContributors") === "true" || formData.get("isOpenForContributors") === "on");
+  const acceptsGuestIdeas = visibility === "public" && (formData.get("acceptsGuestIdeas") === "true" || formData.get("acceptsGuestIdeas") === "on");
   // The schema trims it and turns an empty box into null; it must be given a string.
   const contributorGuidelines = (formData.get("contributorGuidelines") as string | null) ?? "";
 
@@ -96,13 +114,14 @@ export async function updateProjectAction(
     siteUrl: formData.get("siteUrl") ?? "",
     visibility,
     isOpenForContributors,
+    acceptsGuestIdeas,
     contributorGuidelines,
   });
   if (!parsed.success) return fromZodError(parsed.error, "Check the project settings.");
   const slug = String(formData.get("slug") ?? "").trim();
   const project = await prisma.project.findFirst({
     where: { organisationId, slug },
-    select: { id: true, name: true, goal: true, repoUrl: true, stagingUrl: true, siteUrl: true, visibility: true, isOpenForContributors: true, contributorGuidelines: true, rewardConfig: true },
+    select: { id: true, name: true, goal: true, repoUrl: true, stagingUrl: true, siteUrl: true, visibility: true, isOpenForContributors: true, acceptsGuestIdeas: true, contributorGuidelines: true, rewardConfig: true },
   });
   if (!project) return { error: "Project not found." };
 
@@ -111,7 +130,7 @@ export async function updateProjectAction(
   const rewardConfig = rawReward ? parseProjectRewardConfig(rawReward, platformBase) : undefined;
 
   const changes: Record<string, { from: unknown; to: unknown }> = {};
-  for (const field of ["name", "goal", "repoUrl", "stagingUrl", "siteUrl", "visibility", "isOpenForContributors", "contributorGuidelines"] as const) {
+  for (const field of ["name", "goal", "repoUrl", "stagingUrl", "siteUrl", "visibility", "isOpenForContributors", "acceptsGuestIdeas", "contributorGuidelines"] as const) {
     if (project[field] !== parsed.data[field]) {
       changes[field] = { from: project[field], to: parsed.data[field] };
     }
@@ -127,6 +146,8 @@ export async function updateProjectAction(
         data: {
           ...parsed.data,
           ...(rewardConfig !== undefined ? { rewardConfig } : {}),
+          // Opened to contributors just now: the Earn banner names it and comes back for it (#earnings).
+          ...(parsed.data.isOpenForContributors && !project.isOpenForContributors ? { openedForContributorsAt: new Date() } : {}),
         },
       });
       await tx.projectAuditEvent.create({
@@ -182,40 +203,6 @@ export async function saveProjectLinksAction(
   return { message: "Saved." };
 }
 
-/** Create a route/role/viewport mission set for a project (#619). */
-export async function createTestMissionAction(
-  _previous: ProjectActionResult | undefined,
-  formData: FormData,
-): Promise<ProjectActionResult> {
-  const user = await requireUser();
-  const organisationId = await currentOrganisationIdFor(user.id);
-  if (!organisationId) return { error: NO_ORGANISATION_MESSAGE };
-
-  const projectId = String(formData.get("projectId") ?? "").trim();
-  const project = projectId ? await prisma.project.findFirst({
-    where: { id: projectId, organisationId },
-    select: { id: true },
-  }) : null;
-  if (!project) return { error: "Project not found." };
-  if (!(await isAdminOfOrganisation(user, organisationId))) {
-    return { error: "Only project admins can manage test missions." };
-  }
-
-  const parsed = createMissionSchema.safeParse({
-    routePattern: formData.get("routePattern"),
-    brief: formData.get("brief"),
-    roles: formData.getAll("roles"),
-    viewports: formData.getAll("viewports"),
-  });
-  if (!parsed.success) return fromZodError(parsed.error, "Check the mission details");
-
-  const result = await createTestMissions(project.id, parsed.data);
-  revalidatePath("/", "layout");
-  return result.count > 0
-    ? { message: `Added ${result.count} test mission${result.count === 1 ? "" : "s"}.` }
-    : { message: "Those route, role, and viewport missions already exist." };
-}
-
 /**
  * Create a project in the current organisation and make it active (#426).
  *
@@ -246,6 +233,7 @@ export async function createProjectAction(
   const visibilityRaw = (formData.get("visibility") as string | null)?.trim();
   const visibility: "public" | "private" = visibilityRaw === "public" ? "public" : "private";
   const isOpenForContributors = visibility === "public" && (formData.get("isOpenForContributors") === "true" || formData.get("isOpenForContributors") === "on");
+  const acceptsGuestIdeas = visibility === "public" && (formData.get("acceptsGuestIdeas") === "true" || formData.get("acceptsGuestIdeas") === "on");
   // The schema trims it and turns an empty box into null; it must be given a string.
   const contributorGuidelines = (formData.get("contributorGuidelines") as string | null) ?? "";
 
@@ -257,6 +245,7 @@ export async function createProjectAction(
     siteUrl: formData.get("siteUrl") ?? "",
     visibility,
     isOpenForContributors,
+    acceptsGuestIdeas,
     contributorGuidelines,
   });
   if (!parsed.success) return fromZodError(parsed.error, "Check the project settings.");
@@ -286,6 +275,8 @@ export async function createProjectAction(
         stagingUrl: parsed.data.stagingUrl,
         visibility,
         isOpenForContributors,
+        openedForContributorsAt: isOpenForContributors ? new Date() : null,
+        acceptsGuestIdeas,
         contributorGuidelines: parsed.data.contributorGuidelines,
         rewardConfig: rewardConfig ?? undefined,
         workflow: { create: {} },
@@ -328,7 +319,7 @@ export async function setProjectArchivedAction(formData: FormData): Promise<void
   }
 
   revalidatePath("/", "layout");
-  redirect(await projectsMessage("notice", archived ? "Project archived." : "Project restored."));
+  redirect(await projectsMessage("notice", archived ? "Project archived." : "Project restored.", { organisationId: owner.organisationId }));
 }
 
 /** Delete a project after the owner types its name, and only when it has no issues. */
@@ -359,5 +350,5 @@ export async function deleteProjectAction(formData: FormData): Promise<void> {
   }
 
   revalidatePath("/", "layout");
-  redirect(await projectsMessage("notice", "Project deleted."));
+  redirect(await projectsMessage("notice", "Project deleted.", { organisationId: owner.organisationId, deletedSlug: project.slug }));
 }

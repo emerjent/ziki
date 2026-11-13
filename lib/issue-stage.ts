@@ -151,7 +151,9 @@ type OptionalDelegates = {
  * queries. This is the one place "confirmed" is decided — for `isConfirmed()`,
  * lists, the work feed and the merge queue: the weighted confirms reach the
  * project's `confirmationsNeeded`, each counted only after the latest edit and
- * unless undone (#issue-confirmations, #confirmation-weights).
+ * unless undone (#issue-confirmations, #confirmation-weights). An issue made
+ * from an already-vetted idea (`vettedAt`, #vetted-start-now) is confirmed from
+ * the start: its filer vouched for it, and it goes straight to work.
  * Confirming means real and not a duplicate, so there is no separate
  * duplicate clearance. Neutral counts for nothing.
  */
@@ -169,6 +171,7 @@ export async function readConfirmations(
       projectId: true,
       status: true,
       substatus: true,
+      vettedAt: true,
     },
   });
   if (!bugs?.length) return result;
@@ -233,7 +236,7 @@ export async function readConfirmations(
     result.set(bug.id, {
       status: bug.status,
       substatus: bug.substatus,
-      confirmed: isConfirmedCount(accepts, needed),
+      confirmed: Boolean(bug.vettedAt) || isConfirmedCount(accepts, needed),
       accepts,
       rejects,
       needed,

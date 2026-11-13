@@ -6,6 +6,7 @@ import { requireUser } from "@/lib/auth-helpers";
 import { isLinkPreviewBot } from "@/lib/link-preview";
 import { isPublicAgentPath } from "@/lib/public-agent-paths";
 import { projectOverviewSegments } from "@/lib/project-slug";
+import { publicIntakeSegments } from "@/lib/public-project-paths";
 import { AppHeader } from "@/components/app-header";
 import { getUnreadCount } from "@/lib/lookups";
 import { MAIN_CONTENT_ID, SkipLink } from "@/components/skip-link";
@@ -17,9 +18,11 @@ import { prisma } from "@/lib/prisma";
 import { currentOrganisationIdFor } from "@/lib/organisation-context";
 import { firstProjectRefFor } from "@/lib/project-route";
 import { organisationsForUser } from "@/lib/organisations";
+import type { OrganisationRole } from "@/lib/organisation-role";
 import { countPendingEscalations } from "@/lib/agent-questions";
 import { loadOwnAgents } from "@/lib/dashboard-overview";
 import { AgentsDock, type DockAgent } from "@/components/agents-dock";
+import { OnCallBar } from "@/components/on-call-bar";
 import { appVersionLabel } from "@/lib/deployed-version";
 import { agentActivity, agentEarnings } from "@/lib/points/agent-earnings";
 import { headerEarnings } from "@/lib/earnings";
@@ -58,7 +61,10 @@ export default async function AppLayout({
   }
 
   const reqPath = (await headers()).get("x-ziki-path") ?? "";
-  const overviewSegments = !session?.user ? projectOverviewSegments(reqPath) : null;
+  // A guest on /security gets the public Ziki Security page, which brings its own header and footer.
+  if (!session?.user && reqPath === "/security") return <>{children}</>;
+  const intakeSegments = !session?.user ? publicIntakeSegments(reqPath) : null;
+  const overviewSegments = !session?.user ? projectOverviewSegments(reqPath) ?? intakeSegments : null;
   const overviewProject = overviewSegments
     ? await prisma.project.findFirst({
         where: {
@@ -68,6 +74,7 @@ export default async function AppLayout({
           // the shell doesn't tell outsiders which private projects exist.
           visibility: "public",
           archivedAt: null,
+          ...(intakeSegments?.kind === "report" ? { acceptsGuestIdeas: true } : {}),
           organisation: { slug: overviewSegments.orgSlug, archivedAt: null },
         },
         select: { id: true },
@@ -104,6 +111,7 @@ export default async function AppLayout({
   let externalProjects: ExternalProjectChoice[] = [];
   let activeOrganisationId: string | null = null;
   let organisationId: string | null = null;
+  let organisationRole: OrganisationRole | null = null;
   try {
     organisationId = await currentOrganisationIdFor(user.id);
     activeOrganisationId = organisationId;
@@ -150,6 +158,8 @@ export default async function AppLayout({
       list.push({ id: p.id, name: p.name, slug: p.slug });
       projectsByOrg.set(p.organisationId, list);
     }
+
+    organisationRole = activeOrganisations.find((organisation) => organisation.id === activeOrganisationId)?.role ?? null;
 
     organisationOptions = activeOrganisations.map((organisation) => ({
       id: organisation.id,
@@ -211,7 +221,7 @@ export default async function AppLayout({
         prisma.agentRequest.groupBy({ by: ["agentId"], where: { agentId: { in: ids }, doneAt: null }, _count: { _all: true } }),
       ]);
       const pendingBy = new Map(pending.map((row) => [row.agentId, row._count._all]));
-      dockAgents = agents.map((agent) => ({ id: agent.id, name: agent.name, username: agent.username, avatar: agent.avatar, status: agent.status, activity: agent.activity, issue: agent.issue, question: agent.question, earnedPoints: earned.get(agent.id) ?? 0, ...(activity.get(agent.id) ?? { bids: 0, comments: 0, pointsToday: 0 }), pendingRequests: pendingBy.get(agent.id) ?? 0 }));
+      dockAgents = agents.map((agent) => ({ id: agent.id, name: agent.name, username: agent.username, avatar: agent.avatar, status: agent.status, activity: agent.activity, issue: agent.issue, question: agent.question, needsSetup: agent.needsSetup, earnedPoints: earned.get(agent.id) ?? 0, ...(activity.get(agent.id) ?? { bids: 0, comments: 0, pointsToday: 0 }), pendingRequests: pendingBy.get(agent.id) ?? 0 }));
     } catch (error) {
       console.error("[layout] agents failed", error);
     }
@@ -241,7 +251,7 @@ export default async function AppLayout({
   }
 
   return (
-    // data-app-shell switches the page (and its dialogs and toasts) to Inter; see globals.css.
+    // data-app-shell marks the signed-in app shell for the on-screen guide.
     <div data-app-shell="" className="flex min-h-screen flex-col bg-zk-bg">
       <SkipLink />
       <div className="flex min-w-0 flex-1 flex-col">
@@ -257,6 +267,7 @@ export default async function AppLayout({
           organisationOptions={organisationOptions}
           externalProjects={externalProjects}
           activeOrganisationId={activeOrganisationId}
+          organisationRole={organisationRole}
           defaultProjectSlug={defaultProjectSlug}
           earned={earned}
           earningsOrganisationId={earningsOrganisationId}
@@ -272,6 +283,7 @@ export default async function AppLayout({
         >
           {children}
         </main>
+        <OnCallBar user={user} />
       </div>
       {/* The agents dock keeps the page's foot clear of its floor line itself, as tall as what stands on it, and draws nothing (no spacer either) where it doesn't help. */}
       <AgentsDock agents={dockAgents} defaultProjectSlug={defaultProjectSlug} memberCount={memberCount} />

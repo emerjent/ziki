@@ -13,7 +13,7 @@ import { strandedDelivery } from "@/lib/agent-api/stranded-delivery";
 import { issueChangePayload } from "@/lib/agent-api/web-events";
 import { requireLevel } from "@/lib/agents/levels";
 import { reviewerConflict, ReviewerNotIndependentError } from "@/lib/agents/independence";
-import { statusChangedSummary } from "@/lib/activity-log";
+import { assigneeChangedSummary, statusChangedSummary } from "@/lib/activity-log";
 import { issueIdFor, parseIssueRef, resolveIssueRef } from "@/lib/issue-ref";
 import { isDeliveryOverdue, isOwnerWaitOver, ownerWaitCapMinutes, OWNER_REMINDER_MINUTES } from "@/lib/claim-deadline";
 import { workflowFor } from "@/lib/workflow";
@@ -114,7 +114,7 @@ async function releaseClaimIfStale(
     // Re-read after locking: a heartbeat or another sweep may have won the race.
     const fresh = await tx.issueClaim.findFirst({ where: { id: claim.id, status: "active", releasedAt: null,
       agent: { pausedAt: null }, bug: { projectId, organisationId, isDeleted: false, status: "in_progress" } },
-      include: { bug: { select: { pullRequestUrl: true, project: { select: { ownerWaitCapMinutes: true } } } } } });
+      include: { bug: { select: { pullRequestUrl: true, assignee: { select: { name: true } }, project: { select: { ownerWaitCapMinutes: true } } } } } });
     const now = new Date();
     if (!fresh) return { released: false, opened: false };
     let reason: "silence" | "deadline" | "owner_unresponsive";
@@ -147,6 +147,12 @@ async function releaseClaimIfStale(
       const reopenedRow = await tx.bug.updateMany({ where: { id: fresh.bugId, projectId, organisationId,
         isDeleted: false, assigneeId: fresh.beneficiaryUserId, status: "in_progress", pullRequestUrl: null }, data: { assigneeId: null, ...moveTo("open") } });
       reopened = reopenedRow.count > 0;
+      if (reopened) {
+        await tx.bugActivity.createMany({ data: [
+          { bugId: fresh.bugId, actorId: options.actorUserId ?? "ziki-system", type: "assignee_changed", summary: assigneeChangedSummary(fresh.bug?.assignee?.name ?? null, null), metadata: { field: "assignee", from: fresh.beneficiaryUserId, to: null } },
+          { bugId: fresh.bugId, actorId: options.actorUserId ?? "ziki-system", type: "status_changed", summary: statusChangedSummary("in_progress", "open"), metadata: { field: "status", from: "in_progress", to: "open" } },
+        ] });
+      }
     }
     return { released: true, opened: reopened };
   });

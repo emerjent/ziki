@@ -13,6 +13,8 @@ export type FlatComment = {
   /** A short freeform label shown in its title, e.g. "Blocker"; null when none was given. */
   label?: string | null;
   body: string;
+  /** Optional short context supplied with an agent write (#236). */
+  reason?: string | null;
   createdAt: Date | string;
   editedAt?: Date | string | null;
   deletedAt?: Date | string | null;

@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "@prisma/client";
 import type { AgentContext } from "@/lib/agents/require-agent";
 
 /** Idle and abandoned work (#idle, #abandon, #owner-agents): a manager agent sends idle In progress work nobody holds back to Open, never held, freshly updated or stranded work. */
 const db = vi.hoisted(() => ({
   bug: { findFirst: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn() },
-  bugActivity: { create: vi.fn() },
+  bugActivity: { create: vi.fn(), createMany: vi.fn() },
   abandonVote: { findUnique: vi.fn(), upsert: vi.fn(), findMany: vi.fn() },
-  issueClaim: { update: vi.fn() },
+  issueClaim: { findMany: vi.fn(), findFirst: vi.fn(), count: vi.fn(), update: vi.fn() },
+  issueBid: { updateMany: vi.fn() },
   $queryRaw: vi.fn(),
   $transaction: vi.fn(),
 }));
@@ -37,6 +39,7 @@ vi.mock("@/lib/issue-ref", () => ({
 }));
 
 import { reclaimStaleIssue } from "@/lib/agent-api/availability";
+import { releaseWorkOfRevokedAgent } from "@/lib/agent-api/revoke-release";
 import { abandonVoteSchema, voteAbandoned } from "@/lib/agent-api/abandon";
 import { voteWeight } from "@/lib/governance";
 import { orphanedWhere, sweepOrphanedIssues } from "@/lib/orphaned-issues";
@@ -66,12 +69,60 @@ beforeEach(() => {
   db.bug.findFirst.mockResolvedValue({ id: "b8", number: 8, organisationId: "t1", projectId: "p1", title: "A sample issue", reporterId: "owner-reporter" });
   db.bug.findUnique.mockImplementation(async (args: { select: Record<string, unknown> }) => ("reporterId" in args.select ? reviewed : { assigneeId: "owner-cara", status: "open", substatus: "open" }));
   db.bug.updateMany.mockResolvedValue({ count: 1 });
+  db.bugActivity.createMany.mockResolvedValue({ count: 2 });
+  db.issueClaim.findMany.mockResolvedValue([]);
+  db.issueClaim.findFirst.mockResolvedValue(null);
+  db.issueClaim.count.mockResolvedValue(0);
+  db.issueClaim.update.mockResolvedValue({});
+  db.issueBid.updateMany.mockResolvedValue({ count: 0 });
   db.$queryRaw.mockResolvedValue([{ id: "b8" }]);
   db.$transaction.mockImplementation((run: (tx: typeof db) => unknown) => run(db));
   mocks.staleHold.mockResolvedValue(null);
   mocks.idleInProgress.mockResolvedValue(idleWork());
   mocks.inProgressWork.mockResolvedValue(null);
   mocks.strandedDelivery.mockResolvedValue(null);
+});
+
+describe("revoked claim release activity (#622)", () => {
+  const revoke = () => releaseWorkOfRevokedAgent(db as unknown as Prisma.TransactionClient, {
+    agentId: "agent-cara",
+    organisationId: "t1",
+    actorUserId: "owner-dana",
+    now: lastUpdate,
+  });
+
+  it("records assignee and status changes when revocation reopens an active issue", async () => {
+    db.issueClaim.findMany.mockResolvedValue([{ id: "claim-1", bugId: "b8" }]);
+    db.issueClaim.findFirst.mockResolvedValue({ id: "claim-1", bugId: "b8", status: "active", beneficiaryUserId: "owner-cara" });
+    db.bug.findUnique.mockResolvedValue({ assigneeId: "owner-cara", assignee: { name: "Cara" } });
+
+    await expect(revoke()).resolves.toEqual({ releasedClaims: 1, withdrawnBids: 0 });
+    expect(db.bugActivity.createMany).toHaveBeenCalledWith({ data: expect.arrayContaining([
+      expect.objectContaining({ bugId: "b8", actorId: "owner-dana", type: "assignee_changed", metadata: { field: "assignee", from: "owner-cara", to: null } }),
+      expect.objectContaining({ bugId: "b8", actorId: "owner-dana", type: "status_changed", metadata: { field: "status", from: "in_progress", to: "open" } }),
+    ]) });
+  });
+
+  it("logs a plan-review status change when revocation reopens the plan claim", async () => {
+    db.issueClaim.findMany.mockResolvedValue([{ id: "claim-1", bugId: "b8" }]);
+    db.issueClaim.findFirst.mockResolvedValue({ id: "claim-1", bugId: "b8", status: "planning", beneficiaryUserId: "owner-cara" });
+    db.bug.findUnique.mockResolvedValue({ assigneeId: null, assignee: null });
+
+    await expect(revoke()).resolves.toEqual({ releasedClaims: 1, withdrawnBids: 0 });
+    expect(db.bugActivity.createMany).toHaveBeenCalledWith({ data: [
+      expect.objectContaining({ bugId: "b8", actorId: "owner-dana", type: "status_changed", metadata: { field: "status", from: "plan_review", to: "open" } }),
+    ] });
+  });
+
+  it("does not record reopen activity when the issue update guard fails", async () => {
+    db.issueClaim.findMany.mockResolvedValue([{ id: "claim-1", bugId: "b8" }]);
+    db.issueClaim.findFirst.mockResolvedValue({ id: "claim-1", bugId: "b8", status: "active", beneficiaryUserId: "owner-cara" });
+    db.bug.findUnique.mockResolvedValue({ assigneeId: "owner-cara", assignee: { name: "Cara" } });
+    db.bug.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(revoke()).resolves.toEqual({ releasedClaims: 1, withdrawnBids: 0 });
+    expect(db.bugActivity.createMany).not.toHaveBeenCalled();
+  });
 });
 
 describe("reclaiming idle In progress work nobody holds (#idle)", () => {

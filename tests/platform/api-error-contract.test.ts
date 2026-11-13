@@ -11,10 +11,12 @@ import { createJobSchema, jobReviewSchema, submitJobSchema } from "@/lib/validat
 import { redesignSchema } from "@/lib/redesigns";
 import { missionCoverageSchema, nextMissionSchema } from "@/lib/missions";
 import { bidSchema } from "@/lib/agent-api/bid";
+import { addRowsSchema, rowActionSchema } from "@/lib/proof";
 import { extendSchema } from "@/lib/agent-api/deadline";
 import { releaseSchema } from "@/lib/agent-api/offer";
 import { structureInputSchema } from "@/lib/agent-api/structure";
 import { testVerdictBodySchema } from "@/lib/agent-api/test-verdict";
+import { forceMergeBodySchema } from "@/lib/agent-api/force-merge";
 import { deliveryBodySchema } from "@/lib/agent-api/delivery";
 import { confirmationSchema } from "@/lib/agent-api/confirmations";
 import { penaltySchema } from "@/lib/agent-api/confirmation-penalties";
@@ -29,6 +31,7 @@ import { repairPullRequestSchema } from "@/lib/agent-api/repair-pull-request";
 import { pullRequestReportSchema } from "@/lib/validations/pull-request-report";
 import { deploymentSchema } from "@/lib/agent-api/deployment";
 import { archiveIdeaSchema, withdrawIdeaSchema } from "@/lib/idea-archive";
+import { rejectIdeaSchema } from "@/lib/idea-rejection";
 import { createMarketingTaskTypeSchema, updateMarketingTaskTypeSchema } from "@/lib/marketing/task-types";
 import { agentProfileUpdateSchema, agentSkillsReplaceSchema, agentSkillUpsertSchema } from "@/lib/validations/agent-profile";
 import { agentPreferenceCreateSchema, agentPreferenceUpdateSchema } from "@/lib/validations/agent-preferences";
@@ -74,6 +77,8 @@ describe("agent API HTTP errors", () => {
  */
 const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
   ziki_update_profile: agentProfileUpdateSchema,
+  ziki_add_test_card_rows: addRowsSchema,
+  ziki_test_card_row: rowActionSchema,
   ziki_set_skills: agentSkillsReplaceSchema,
   ziki_set_skill: agentSkillUpsertSchema,
   ziki_add_preference: agentPreferenceCreateSchema,
@@ -91,6 +96,7 @@ const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
   ziki_penalise_confirmation: penaltySchema,
   ziki_give_idea_verdict: ideaVerdictFields,
   ziki_submit_test_result: testVerdictBodySchema,
+  ziki_force_merge: forceMergeBodySchema,
   ziki_merge_fix: mergeReviewBodySchema,
   ziki_ask_owner: agentQuestionSchema,
   ziki_escalate: agentEscalationSchema,
@@ -116,6 +122,7 @@ const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
   ziki_report_deployment: deploymentSchema,
   ziki_archive_idea: archiveIdeaSchema,
   ziki_withdraw_idea: withdrawIdeaSchema,
+  ziki_reject_idea: rejectIdeaSchema,
   ziki_create_marketing_task_type: createMarketingTaskTypeSchema,
   ziki_update_marketing_task_type: updateMarketingTaskTypeSchema,
 };
@@ -130,6 +137,7 @@ const NOT_OFFERED_TO_AGENTS: Record<string, readonly string[]> = {
   ziki_create_idea: ["typeId"],
   // `action` is the older name for `verdict`, kept for old clients only.
   ziki_merge_fix: ["action"],
+  ziki_reject_idea: ["rejectReason"],
 };
 
 // Fields the route doesn't take from the body: the tool puts them in the path or query.

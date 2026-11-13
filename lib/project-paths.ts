@@ -31,7 +31,7 @@ export function orgHomePath(orgSlug: string, query?: URLSearchParams | string): 
  * issue number. A project may not take one of these names, so
  * `/<a>/<b>/...` with such a `b` is always an old project-first address.
  */
-const PROJECT_PAGES = new Set(["ideas", "issues", "marketing", "notes", "org", "projects", "tasks", "workstream", "work"]);
+const PROJECT_PAGES = new Set(["goals", "ideas", "issues", "marketing", "notes", "org", "projects", "tasks", "workstream", "work"]);
 
 export function isProjectFirstPath(path: string): boolean {
   const [first, second] = path.split("?")[0].split("/").filter(Boolean);
@@ -101,6 +101,11 @@ export function marketingPath(slug: ProjectRef, section = ""): string {
 /** Filing a new report (it starts as an idea). */
 export function newIssuePath(slug: ProjectRef, query?: URLSearchParams | string): string {
   return withQuery(projectPath(slug, "/issues/new"), query);
+}
+
+/** One goal's page with its split wizard and allocation ledger: `/<org>/<project>/goals/<id>`. */
+export function goalPath(slug: ProjectRef, goalId: string): string {
+  return projectPath(slug, `/goals/${encodeURIComponent(goalId)}`);
 }
 
 /** The address without Next's `_rsc` cache marker, which an in-app navigation adds and a full page load must not carry. */

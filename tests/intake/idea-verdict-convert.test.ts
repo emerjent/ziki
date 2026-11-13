@@ -11,7 +11,10 @@ const db = vi.hoisted(() => ({
   $queryRaw: vi.fn(),
   ideaVerdict: { findUnique: vi.fn(), upsert: vi.fn(), findMany: vi.fn() },
   idea: { update: vi.fn(), findUniqueOrThrow: vi.fn() },
-  bug: { create: vi.fn() },
+  bug: { create: vi.fn(), update: vi.fn() },
+  issueClaim: { count: vi.fn(async () => 0), create: vi.fn(async () => ({ id: "c1" })) },
+  user: { findUnique: vi.fn(async () => ({ name: "Ada" })) },
+  bugActivity: { createMany: vi.fn() },
   attachment: { updateMany: vi.fn() },
   securityFinding: { updateMany: vi.fn() },
   issueStake: { updateMany: vi.fn(), findMany: vi.fn(async () => []), update: vi.fn() },
@@ -26,7 +29,8 @@ vi.mock("@/lib/agent-api/events", () => ({ publish }));
 vi.mock("@/lib/agents/audit", () => ({ audit }));
 vi.mock("@/lib/points/platform-rewards", () => ({ getProjectRewardConfig }));
 
-import { convertIdea, convertVettedIdea, giveIdeaVerdict, maxVotesFor, rejectIdea, verdictScore } from "@/lib/agent-api/idea-verdicts";
+import { convertClientVettedIdea, convertIdea, convertVettedIdea, giveIdeaVerdict, maxVotesFor, rejectIdea, verdictScore } from "@/lib/agent-api/idea-verdicts";
+import { formatRejectDetail, ideaNextStep } from "@/lib/next-step";
 
 /** The locked idea row (#idea-table): ideas have their own table, numbers and status. */
 const idea = (overrides: Record<string, unknown> = {}) => ({
@@ -36,6 +40,7 @@ const idea = (overrides: Record<string, unknown> = {}) => ({
   projectId: "p1",
   status: "open", substatus: "open",
   track: "product",
+  source: "internal",
   score: 3,
   reporterId: "ada",
   beneficiaryUserId: "ada",
@@ -335,6 +340,18 @@ describe("convertIdea", () => {
     });
   });
 
+  it("does not subscribe or reward the synthetic reporter of a public-source idea", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ source: "public" })]);
+
+    await convertIdea(agentOf("working"), "p1", "7", "medium");
+
+    const data = db.bug.create.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty("watches");
+    expect(db.pointEntry.createMany).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: [expect.objectContaining({ role: "reporter" })],
+    }));
+  });
+
   it("needs an open idea and a score at the threshold", async () => {
     db.$queryRaw.mockResolvedValue([idea({ score: 2 })]);
     await expect(convertIdea(agentOf("working"), "p1", "i1", "medium")).rejects.toMatchObject({ status: 409, body: { error: "below_threshold", ideaScore: 2, ideaThreshold: 3 } });
@@ -345,30 +362,82 @@ describe("convertIdea", () => {
   });
 });
 
-/** Already vetted: an idea its owner says was approved elsewhere becomes an issue at once, with no verdicts. */
+/**
+ * Already vetted (#vetted-start-now): an idea its owner says was vetted becomes an issue at once that counts as
+ * confirmed, and the agent that filed it holds it In progress, with no verdicts, confirmations, bids or offer.
+ */
 describe("convertVettedIdea", () => {
   const owner: AgentContext = { agentId: "agent-ada", name: "ada", ownerId: "ada", organisationId: "t1", level: "working", burst: false, keyId: "k1" };
 
-  it("converts an idea with no verdicts, says it was vetted on the issue's activity and on the event, and nothing else is skipped", async () => {
+  it("makes a confirmed issue the filing agent holds at once, In progress, and pays the reporter now", async () => {
     db.$queryRaw.mockResolvedValue([idea({ score: 0 })]);
     const result = await convertVettedIdea(db as never, owner, "p1", "i1", "Approved by Mark, sheet row 42", "medium");
-    expect(result).toMatchObject({ ideaId: "i1", issueId: "b9", issueNumber: 42, ideaScore: 0 });
+    expect(result).toMatchObject({ ideaId: "i1", issueId: "b9", issueNumber: 42, ideaScore: 0, claimId: "c1", claimStatus: "active" });
+    expect(result.deliverBy).toEqual(expect.any(String));
     expect(db.bug.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        status: "open", substatus: "requires_confirmation",
+        vettedAt: expect.any(Date),
         activities: { create: expect.objectContaining({ summary: expect.stringContaining("marked already vetted: Approved by Mark, sheet row 42"), metadata: { fromIdea: 7, vettedNote: "Approved by Mark, sheet row 42" } }) },
       }),
+    }));
+    // The filer's agent holds it: an active claim with a delivery deadline, no offer to accept.
+    expect(db.issueClaim.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ bugId: "b9", beneficiaryUserId: "ada", agentId: "agent-ada", status: "active", deliverBy: expect.any(Date) }),
+    }));
+    expect(db.bug.update).toHaveBeenCalledWith({ where: { id: "b9" }, data: expect.objectContaining({ assigneeId: "ada", status: "in_progress", substatus: "in_progress" }) });
+    // A product issue's reporter is normally paid on confirmation; a vetted one is confirmed from the start.
+    expect(db.pointEntry.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: [expect.objectContaining({ userId: "ada", role: "reporter", bugId: "b9" })],
     }));
     expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({
       type: "issue.converted",
       payload: expect.objectContaining({ via: "already_vetted", decidedByUserId: "ada", vettedNote: "Approved by Mark, sheet row 42" }),
     }));
+    expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({
+      type: "claim.accepted",
+      payload: expect.objectContaining({ claimId: "c1", issueId: "b9", beneficiaryUserId: "ada", via: "already_vetted" }),
+    }));
+  });
+
+  it("opens plan review instead on a complex issue", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 0 })]);
+    const result = await convertVettedIdea(db as never, owner, "p1", "i1", "Approved by Mark", "complex");
+    expect(result).toMatchObject({ claimStatus: "planning", deliverBy: null });
+    expect(db.issueClaim.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "planning", agentId: "agent-ada" }) }));
+    expect(db.bug.update).toHaveBeenCalledWith({ where: { id: "b9" }, data: expect.objectContaining({ assigneeId: "ada", substatus: "plan_review" }) });
+  });
+
+  it("refuses at the owner's capacity, so nothing is held", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 0 })]);
+    db.issueClaim.count.mockResolvedValue(DEFAULT_PROJECT_WORKFLOW.maxActiveClaims);
+    await expect(convertVettedIdea(db as never, owner, "p1", "i1", "Approved by Mark", "medium")).rejects.toMatchObject({ status: 409, body: { error: "at_capacity" } });
+    expect(db.issueClaim.create).not.toHaveBeenCalled();
+    expect(db.bug.update).not.toHaveBeenCalled();
   });
 
   it("does not convert an idea that is not open", async () => {
     db.$queryRaw.mockResolvedValue([idea({ score: 0, status: "rejected" })]);
     await expect(convertVettedIdea(db as never, owner, "p1", "i1", "Approved by Mark", "medium")).rejects.toMatchObject({ status: 409, body: { error: "idea_rejected" } });
     expect(db.bug.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("convertClientVettedIdea", () => {
+  it("opens a vetted issue and links the private finding without inventing an agent claim", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 0 })]);
+    await convertClientVettedIdea(db as never, { organisationId: "t1", projectId: "p1" }, "i1", "ada");
+
+    expect(db.bug.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ substatus: "open", vettedAt: expect.any(Date) }),
+    }));
+    expect(db.securityFinding.updateMany).toHaveBeenCalledWith({
+      where: { ideaId: "i1" }, data: { bugId: "b9" },
+    });
+    expect(db.issueClaim.create).not.toHaveBeenCalled();
+    expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({
+      type: "issue.converted", actorAgentId: null,
+      payload: expect.objectContaining({ via: "already_vetted", decidedByAgentId: null }),
+    }));
   });
 });
 
@@ -384,10 +453,10 @@ describe("rejectIdea (#idea-rejected)", () => {
   it("rejects a bad idea (votes reach the threshold, more bad than good), and says so", async () => {
     db.ideaVerdict.findMany.mockResolvedValue(verdicts(2, 4));
     const result = await rejectIdea(manager("manager"), "p1", "7");
-    expect(result).toMatchObject({ ideaId: "i1", ideaNumber: 7, status: "rejected", totalVotes: 6, goodVotes: 2 });
+    expect(result).toMatchObject({ ideaId: "i1", ideaNumber: 7, status: "rejected", totalVotes: 6, goodVotes: 2, rejectReason: null });
     expect(db.idea.update).toHaveBeenCalledWith({
       where: { id: "i1" },
-      data: { status: "rejected", rejectedAt: expect.any(Date), rejectedByAgentId: "agent-dana" },
+      data: { status: "rejected", rejectedAt: expect.any(Date), rejectedByAgentId: "agent-dana", rejectReason: null },
     });
     expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({
       type: "idea.rejected",
@@ -395,6 +464,45 @@ describe("rejectIdea (#idea-rejected)", () => {
       payload: expect.objectContaining({ ideaId: "i1", ideaNumber: 7, totalVotes: 6, goodVotes: 2 }),
     }));
     expect(audit).toHaveBeenCalledWith(expect.anything(), "idea.rejected", "idea:i1", { totalVotes: 6, goodVotes: 2 });
+  });
+
+  it("records rejectReason when provided and publishes it", async () => {
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(2, 4));
+    const result = await rejectIdea(manager("manager"), "p1", "7", "it doesn't align with the product's vision");
+    expect(result).toMatchObject({
+      ideaId: "i1",
+      ideaNumber: 7,
+      status: "rejected",
+      rejectReason: "it doesn't align with the product's vision",
+      totalVotes: 6,
+      goodVotes: 2,
+    });
+    expect(db.idea.update).toHaveBeenCalledWith({
+      where: { id: "i1" },
+      data: {
+        status: "rejected",
+        rejectedAt: expect.any(Date),
+        rejectedByAgentId: "agent-dana",
+        rejectReason: "it doesn't align with the product's vision",
+      },
+    });
+    expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({
+      type: "idea.rejected",
+      projectId: "p1",
+      payload: expect.objectContaining({
+        ideaId: "i1",
+        ideaNumber: 7,
+        totalVotes: 6,
+        goodVotes: 2,
+        rejectReason: "it doesn't align with the product's vision",
+      }),
+    }));
+    expect(audit).toHaveBeenCalledWith(
+      expect.anything(),
+      "idea.rejected",
+      "idea:i1",
+      { totalVotes: 6, goodVotes: 2, reason: "it doesn't align with the product's vision" },
+    );
   });
 
   it("needs a manager agent", async () => {
@@ -412,6 +520,53 @@ describe("rejectIdea (#idea-rejected)", () => {
     expect(db.idea.update).not.toHaveBeenCalled();
   });
 
+  describe("ideaNextStep for rejected ideas (#idea-rejected)", () => {
+    it("formats rejectReason with context to why it was rejected", () => {
+      const step = ideaNextStep({
+        status: "rejected",
+        score: 1,
+        threshold: 3,
+        totalVotes: 3,
+        bad: true,
+        convertible: false,
+        issueNumber: null,
+        rejectReason: "it doesn't align with the product's vision",
+      });
+      expect(step).toEqual({
+        tone: "bad",
+        title: "Idea rejected",
+        detail: "Idea rejected because it doesn't align with the product's vision.",
+        actor: null,
+        action: null,
+      });
+    });
+
+    it("handles various reason casings and prefixes cleanly", () => {
+      expect(formatRejectDetail("because it doesn't align with the product's vision")).toBe(
+        "Idea rejected because it doesn't align with the product's vision.",
+      );
+      expect(formatRejectDetail("Idea rejected because it doesn't align with the product's vision.")).toBe(
+        "Idea rejected because it doesn't align with the product's vision.",
+      );
+      expect(formatRejectDetail("It doesn't align with the product's vision.")).toBe(
+        "Idea rejected because it doesn't align with the product's vision.",
+      );
+    });
+
+    it("falls back to generic manager agent message when no reason is given", () => {
+      const step = ideaNextStep({
+        status: "rejected",
+        score: 1,
+        threshold: 3,
+        totalVotes: 3,
+        bad: true,
+        convertible: false,
+        issueNumber: null,
+        rejectReason: null,
+      });
+      expect(step.detail).toBe("A manager agent rejected it. It takes no more verdicts.");
+    });
+  });
 });
 
 describe("the marketing track at conversion", () => {

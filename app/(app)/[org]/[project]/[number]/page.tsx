@@ -17,9 +17,11 @@ import { agentMentionId } from "@/lib/mentions";
 import { requireUser } from "@/lib/auth-helpers";
 import { bugInOrganisation, currentOrganisationIdFor } from "@/lib/organisation-context";
 import { issueHref, issuePath, queryString } from "@/lib/issue-ref";
+import { takesBids } from "@/lib/issue-substatus";
 import { findProjectIssue, parseIssueNumber } from "@/lib/project-issue";
 import { resolveSessionUserId } from "@/lib/session-user";
 import { LocalTime } from "@/components/local-time";
+import { IssuePrioritySelect } from "@/components/issue-priority-select";
 import { ClearDuplicateButton, MarkDuplicateButton } from "@/components/duplicate-controls";
 import { currentResolution, isFinishedStatus, type StatusChangeActivity } from "@/lib/resolution-note";
 import { statusLabel as resolutionStatusLabel } from "@/lib/labels";
@@ -124,6 +126,12 @@ import { LiveFlow } from "@/components/live-flow";
 import { latestPullRequestReport, gateReport, pullRequestStateView, type PullRequestStateView } from "@/lib/agent-api/pull-request-report";
 import { prGate, reportWanted } from "@/lib/agent-api/pr-gate";
 import { parseGitHubRepoUrl } from "@/lib/github/pull-request-url";
+import { mergeChecklist } from "@/lib/merge-checklist";
+import { MergeChecklistCard } from "@/components/merge-checklist";
+import { Prisma } from "@prisma/client";
+import { TestCardPanel } from "@/components/test-card";
+import { loadCard, proofAttachmentIds, storedProof, type JudgementProofState, type VerdictProof } from "@/lib/proof";
+import { newIssueHref } from "@/lib/reported-from";
 import { PROJECT_REPOSITORIES_SELECT, repoForPullRequest } from "@/lib/github/project-repositories";
 import { DecisionCard } from "@/components/decision-card";
 import { decisionFor } from "@/lib/your-decision";
@@ -151,6 +159,8 @@ import { SubmissionEvidence } from "@/components/submission-evidence";
 import { PullRequestChecks } from "@/components/pull-request-checks";
 import { GitHubStatusPanel, type GitHubStatusPanelProps } from "@/components/github-status-panel";
 import { storedGitHubStatus } from "@/lib/github/sync";
+import { lastReadyPreviewUrl, latestPreviewBuild } from "@/lib/previews/builds";
+import { PreviewCard, type PreviewCardProps } from "@/components/preview-card";
 import { githubStatusPowers } from "@/lib/github/status-access";
 import { voteDirection } from "@/lib/voting";
 import {
@@ -160,8 +170,10 @@ import {
 import "./issue-detail.css";
 import { stateLabel } from "@/lib/labels";
 import { IssueRewardPanel } from "@/components/issue-reward-panel";
+import { RetestRequest } from "@/components/retest-request";
 import { rewardEstimatesFor } from "@/lib/agent-api/reward-estimates";
 import { IssueBlockersPanel } from "@/components/issue-blockers-panel";
+import { IssueTimeTracking } from "@/components/issue-time-tracking";
 import type { IssueBlockerCandidate } from "@/app/actions/issue-blockers";
 import { activeIn, activeLevels, levelIn } from "@/lib/agents/active-in";
 
@@ -791,13 +803,13 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     ]);
   // Anyone who owns an agent in the organisation can award, through it, an open bid whose votes reached the threshold (#award-bids).
   const canAwardBids =
-    (bug.substatus === "open" || bug.substatus === "requires_confirmation") && !bug.isDeleted
+    takesBids(bug.substatus) && !bug.isDeleted
       ? await loadOptional("award permission", false, async () => Boolean(await awardingAgentOf(user.id, bug.organisationId)))
       : false;
   // One-click bid: while the issue takes bids, nobody is working on it, and you have no open bid on it,
   // the Bids step shows a Bid button with your agents to choose from.
   const bidAgents =
-    (bug.substatus === "open" || bug.substatus === "requires_confirmation") && !bug.isDeleted
+    takesBids(bug.substatus) && !bug.isDeleted
       ? await loadOptional("bid agents", [] as { id: string; name: string }[], async () => {
           const [workedOn, myOpenBid] = await Promise.all([
             prisma.issueClaim.count({ where: { bugId: bug.id, releasedAt: null, status: "active" } }),
@@ -830,7 +842,12 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       agentOwner: agent.owner.name,
     })),
   ];
-  const issueAttachments: AttachmentView[] = attachments.filter((a) => !a.commentId);
+  // #deeper-testing: proof belongs to its judgement (and stays hidden from testers who haven't judged), not the issue's files.
+  const proofIds = new Set(
+    (await loadOptional("proof attachments", [], () => prisma.testVerdict.findMany({ where: { bugId: bug.id, proof: { not: Prisma.DbNull } }, select: { proof: true } })))
+      .flatMap((verdict) => proofAttachmentIds(storedProof(verdict.proof))),
+  );
+  const issueAttachments: AttachmentView[] = attachments.filter((a) => !a.commentId && !proofIds.has(a.id));
   const attachmentsByComment: Record<string, AttachmentView[]> = {};
   for (const a of attachments) {
     if (a.commentId) (attachmentsByComment[a.commentId] ??= []).push(a);
@@ -1005,6 +1022,29 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     };
   }
 
+  // #previews: Ziki's latest preview build of the linked pull request.
+  let previewCard: PreviewCardProps | null = null;
+  if (bug.pullRequestUrl && !bug.isDeleted) {
+    const pullRequestUrl = bug.pullRequestUrl;
+    const [previewBuild, lastReadyUrl, previewsOn] = await Promise.all([
+      loadOptional("preview build", null, () => latestPreviewBuild(bug.id, pullRequestUrl)),
+      loadOptional("last preview", null, () => lastReadyPreviewUrl(bug.id, pullRequestUrl)),
+      loadOptional("preview settings", false, () =>
+        prisma.projectPreviewSettings.findUnique({ where: { projectId: bug.projectId }, select: { enabled: true } }).then((row) => Boolean(row?.enabled)),
+      ),
+    ]);
+    // A build already made shows even after previews are turned off; otherwise only while they're on.
+    if (previewBuild || previewsOn) {
+      previewCard = {
+        bugId: bug.id,
+        pullNumber: parsePullRequestUrl(pullRequestUrl)?.number ?? null,
+        build: previewBuild,
+        lastReadyUrl,
+        canFollow: Boolean(access.membershipRole) || access.admin,
+      };
+    }
+  }
+
   // Comments on the issue itself, at every stage (lib/comment-placement.ts).
   const takesComments = !bug.isDeleted && canContribute;
   // Looked up here, not on `hold`: holder is also what agents read through the API.
@@ -1123,7 +1163,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
   // Threshold-only (#vote-governance): the bar says which vote decides the step, and how far it has got.
   const thresholdOnly = isThresholdOnly(workflow);
   // The open bids' weighted votes (bidHistoryEntries weighs them): the next step names the most voted.
-  const topBidVotes = !bug.isDeleted && bug.substatus === "open"
+  const topBidVotes = !bug.isDeleted && (bug.substatus === "open" || bug.substatus === "merged_broken")
     ? Math.max(0, ...bidList.filter(isOpenBid).map((bid) => bid.votes ?? 0))
     : 0;
   const mergeReviewVotesNow = thresholdOnly && !bug.isDeleted && bug.substatus === "accepted"
@@ -1164,8 +1204,28 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     : null;
   // The judgements as the Delivered rule counts them (independent, weighted, on
   // the delivered pull request), so the bar says what will actually move it.
+  // #deeper-testing: the test card while delivered product work is judged, where the organisation has checks.
+  const card = !bug.isDeleted && bug.track !== "marketing" && bug.status === "done" && bug.pullRequestUrl
+    ? await loadOptional("test card", null, () => loadCard(prisma, bug))
+    : null;
+  const testCard = card?.on ? card : null;
   const judgementCount = bug.status === "done" && !bug.isDeleted
-    ? await loadOptional("judgement count", null, () => countedJudgements(prisma, bug.id))
+    ? await loadOptional("judgement count", null, () => countedJudgements(prisma, bug.id, card ?? undefined))
+    : null;
+  // #merge-checklist: while delivered work is judged, reviewed or waiting to
+  // merge, the checks before "good to merge", from the latest pull request report.
+  const checklist = !bug.isDeleted && (bug.status === "done" || bug.status === "merge") && bug.pullRequestUrl
+    ? await loadOptional("merge checklist", null, async () => {
+        const [report, project] = await Promise.all([
+          latestPullRequestReport(bug.id, bug.pullRequestUrl),
+          prisma.project.findUnique({ where: { id: bug.projectId }, select: { repoUrl: true } }),
+        ]);
+        return mergeChecklist(report, {
+          pullRequestUrl: bug.pullRequestUrl ?? null,
+          pullRequestHeadSha: bug.pullRequestHeadSha ?? null,
+          repo: parseGitHubRepoUrl(project?.repoUrl),
+        });
+      })
     : null;
   // #live-check: on a Live issue, where its fix really is, from the latest
   // independent check of its pull request rather than the Live label.
@@ -1246,7 +1306,20 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     [...list].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   const firstAt = (list: { updatedAt: Date | string }[]) => newestFirst(list).at(-1)?.updatedAt ?? null;
   const timelineDeliveries = newestFirst(deliveryList);
-  const timelineVerdicts = newestFirst(testVerdictList);
+  // #deeper-testing: each judgement's proof, named by its check or square, with its file.
+  const squareLabel = new Map(testCard?.rows.flatMap((row) => row.squares.map((sq) => [sq.key, sq.env ? `${row.text} · ${sq.env}` : row.text] as const)));
+  const proofItems = (proof: VerdictProof | null | undefined) =>
+    proof
+      ? [...Object.entries(proof.checks ?? {}).map(([id, entry]) => [`check:${id}`, entry] as const), ...Object.entries(proof.squares ?? {})].map(([key, { attachmentId, ...entry }]) => ({
+          ...entry,
+          label: squareLabel.get(key) ?? key.replace(/^check:/, ""),
+          file: attachments.find((a) => a.id === attachmentId) ?? null,
+        }))
+      : null;
+  const timelineVerdicts = newestFirst(testVerdictList).map((verdict) => {
+    const standing = testCard?.judgements[verdict.id];
+    return { ...verdict, proofItems: proofItems(verdict.proof), proofNote: standing ? proofNote(standing.state, standing.missing) : null };
+  });
   const timelineReviews = newestFirst(mergeReviewList);
 
   // The Conversation card shows only when it has entries in it: no empty boxes.
@@ -1523,7 +1596,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               bidAction={bidAgents.length > 0 ? <BidButton bugId={bug.id} agents={bidAgents} /> : undefined}
               bids={bidList}
               at={firstAt(bidList)}
-              collapsed={bug.status !== "open"}
+              collapsed={!takesBids(bug.substatus)}
               canAward={canAwardBids}
               awardThreshold={workflow.awardThreshold}
             />
@@ -1951,6 +2024,9 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                 <span className={`${issueChipBaseClass} bg-zk-chip text-zk-text2`}>{bug.type.name}</span>
               </p>
             ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+              <IssuePrioritySelect bugId={bug.id} priority={bug.priority} />
+            </div>
           </div>
 
           <div className="flex shrink-0 flex-wrap items-center gap-2 self-start print:hidden">
@@ -2087,9 +2163,23 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
             canEdit={canTriage && !bug.isDeleted}
           />
 
+          <IssueTimeTracking bugId={bug.id} canEdit={canUpdateStatus && !bug.isDeleted} />
+
           {deliveredBanner ? <DeliveredBanner {...deliveredBanner} /> : null}
 
           {githubPanel ? <GitHubStatusPanel {...githubPanel} /> : null}
+          {previewCard ? <PreviewCard {...previewCard} /> : null}
+
+          {testCard ? (
+            <TestCardPanel
+              card={testCard}
+              author={testCard.rows.find((row) => row.by)?.by ?? null}
+              priority={bug.priority}
+              bugId={bug.id}
+              canDecide={access.admin}
+              ideaHref={newIssueHref(refOf(bug.project), issueHref(bug))}
+            />
+          ) : null}
 
               {/* Who has the issue, while it is the latest thing (In progress); the timeline below keeps the award after that. */}
               {(hold?.status === "active" || hold?.status === "planning") && bug.status === "in_progress" ? <AwardBox hold={hold} agentPaused={Boolean(workingAgent?.pausedAt)} bugId={bug.id} isWatching={isWatchingIssue} isIssueOwner={bug.reporterId === user.id} /> : null}
@@ -2168,7 +2258,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                           bidAction={bidAgents.length > 0 ? <BidButton bugId={bug.id} agents={bidAgents} /> : undefined}
                           bids={bidList}
                           at={firstAt(bidList)}
-                          collapsed={bug.status !== "open"}
+                          collapsed={!takesBids(bug.substatus)}
                           canAward={canAwardBids}
                           awardThreshold={workflow.awardThreshold}
                         />
@@ -2193,6 +2283,14 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
 
               {closeSuggestions ? <CloseSuggestionsPanel data={closeSuggestions} /> : null}
 
+
+              {bug.status === "resolved" && !bug.isDeleted ? (
+                <RetestRequest
+                  bugId={bug.id}
+                  issueHref={issueHref(bug)}
+                  issueLabel={`${formatIssueNumber(bug.number)} · ${bug.title}`}
+                />
+              ) : null}
 
               {/* Comments, apart from the stage entries (bids, deliveries) in the Conversation. */}
               {takesComments || commentCount > 0 ? (
@@ -2334,6 +2432,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               </form>
             ) : null}
           </section>
+          {checklist ? <MergeChecklistCard checklist={checklist} testCard={Boolean(testCard)} /> : null}
           {/* #rewards: the reward, your estimate, and everyone's. */}
           {rewardRow ? (
             <IssueRewardPanel
@@ -2429,4 +2528,22 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       </div>
     </div>
   );
+}
+
+/** What a judgement's proof means for the count, as a chip beside it (#deeper-testing). */
+function proofNote(state: JudgementProofState, missing: string[]): { label: string; tone: "ok" | "warn" | "bad" | "neutral" } {
+  switch (state) {
+    case "counts":
+      return { label: "Counts", tone: "ok" };
+    case "no_proof":
+      return { label: `Doesn't count yet · no proof: ${missing.join(", ")}`, tone: "warn" };
+    case "earlier_code":
+      return { label: "Earlier code · doesn't count", tone: "neutral" };
+    case "contradicts":
+      return { label: "Proves a fail but says good to merge · doesn't count", tone: "warn" };
+    case "proved_fail":
+      return { label: "Proved it fails", tone: "bad" };
+    case "no_fail_proof":
+      return { label: "Doesn't count · no proof of what fails", tone: "warn" };
+  }
 }

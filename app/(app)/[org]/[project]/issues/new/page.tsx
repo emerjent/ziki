@@ -40,7 +40,7 @@ export default async function NewBugPage({
         </h1>
         <p className="text-sm text-zk-text2">
           {security
-            ? "Describe the weakness and how to reproduce it. It stays private until the fix is live."
+            ? "Describe the weakness and how to reproduce it. It stays private until authorized disclosure."
             : "Give the team the full picture: what you did, what you expected, what happened instead."}
         </p>
       </div>

@@ -16,6 +16,11 @@ const ideaCreate = vi.hoisted(() => vi.fn());
 const projectFindFirst = vi.hoisted(() => vi.fn());
 const projectAreaFindFirst = vi.hoisted(() => vi.fn());
 const issueWatchUpsert = vi.hoisted(() => vi.fn().mockResolvedValue({ id: "iw-1" }));
+const issueWatchCreateMany = vi.hoisted(() => vi.fn().mockResolvedValue({ count: 1 }));
+const commentCreate = vi.hoisted(() => vi.fn());
+const bugUpdate = vi.hoisted(() => vi.fn());
+const bugActivityCreate = vi.hoisted(() => vi.fn());
+const attachmentUpdateMany = vi.hoisted(() => vi.fn().mockResolvedValue({ count: 0 }));
 const userFindUnique = vi.hoisted(() => vi.fn());
 const userFindFirst = vi.hoisted(() => vi.fn());
 const userFindMany = vi.hoisted(() => vi.fn().mockResolvedValue([]));
@@ -37,6 +42,11 @@ vi.mock("@/lib/idea-structuring", async (importOriginal) => ({
 }));
 vi.mock("@/lib/session-user", () => ({ resolveSessionUserId: vi.fn() }));
 vi.mock("@/lib/auth-helpers", () => ({ requireUser: vi.fn() }));
+vi.mock("@/lib/rate-limit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/rate-limit")>()),
+  consumeRateLimit: vi.fn(async () => ({ allowed: true })),
+}));
+vi.mock("@/lib/agent-api/web-events", () => ({ publishWebEvent: vi.fn() }));
 vi.mock("@/lib/organisation-access", () => ({
   currentOrganisationAccess: vi.fn(async () => ({
     organisationId: "own-organisation-id",
@@ -55,7 +65,10 @@ vi.mock("@/lib/organisation-access", () => ({
 }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    bug: { findUnique: bugFindUnique, create: bugCreate },
+    bug: { findUnique: bugFindUnique, create: bugCreate, update: bugUpdate },
+    comment: { create: commentCreate },
+    bugActivity: { create: bugActivityCreate },
+    attachment: { updateMany: attachmentUpdateMany },
     idea: { create: ideaCreate },
     project: { findFirst: projectFindFirst },
     projectArea: { findFirst: projectAreaFindFirst },
@@ -64,7 +77,7 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: membershipFindUnique,
     },
     projectMembership: { findUnique: projectMembershipFindUnique, findFirst: projectMembershipFindFirst },
-    issueWatch: { upsert: issueWatchUpsert, updateMany: vi.fn(), createMany: vi.fn() },
+    issueWatch: { upsert: issueWatchUpsert, updateMany: vi.fn(), createMany: issueWatchCreateMany },
     user: { findUnique: userFindUnique, findFirst: userFindFirst, findMany: userFindMany },
     $transaction,
     $executeRaw,
@@ -72,9 +85,10 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { requireUser } from "@/lib/auth-helpers";
+import { resolveSessionUserId } from "@/lib/session-user";
 import { currentOrganisationIdFor, NO_ORGANISATION_MESSAGE } from "@/lib/organisation-context";
 import { canContributeToProject } from "@/lib/project-permissions";
-import { createBugAction, updateBugAction } from "@/app/actions/issues";
+import { createBugAction, requestRetestAction, updateBugAction } from "@/app/actions/issues";
 import { setWatchingAction } from "@/app/actions/watch";
 
 const organisationOf = currentOrganisationIdFor as unknown as ReturnType<typeof vi.fn>;
@@ -110,6 +124,11 @@ describe("issue actions are organisation-scoped (#425)", () => {
     vi.clearAllMocks();
     (requireUser as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "user-1", role: "user" });
     $transaction.mockImplementation(async (run: (tx: unknown) => unknown) => run({
+      bug: { update: bugUpdate },
+      comment: { create: commentCreate },
+      bugActivity: { create: bugActivityCreate },
+      attachment: { updateMany: attachmentUpdateMany },
+      issueWatch: { createMany: issueWatchCreateMany },
       idea: { create: ideaCreate },
       projectArea: { findFirst: projectAreaFindFirst },
       $executeRaw,
@@ -177,6 +196,50 @@ describe("issue actions are organisation-scoped (#425)", () => {
       error: expect.any(String),
     });
     expect(bugFindUnique.mock.calls[0][0].where).toEqual({ id: "bug-in-acme", organisationId: "organisation-zedu" });
+  });
+
+  it("refuses retest requests for issues that are not Live, without changing the issue", async () => {
+    organisationOf.mockResolvedValue("organisation-zedu");
+    vi.mocked(resolveSessionUserId).mockResolvedValue({ userId: "user-1" });
+    bugFindUnique.mockResolvedValue({ id: "bug-1", status: "in_progress", isDeleted: false });
+    const request = form({
+      operatingSystem: "Windows",
+      installedVersion: "",
+      currentBehavior: "The same issue still happens after restarting.",
+    });
+
+    await expect(requestRetestAction("bug-1", request)).resolves.toMatchObject({ error: "Retest requests are available after an issue is Live." });
+    expect(bugFindUnique.mock.calls[0][0].where).toEqual({ id: "bug-1", organisationId: "organisation-zedu" });
+    expect(bugUpdate).not.toHaveBeenCalled();
+    expect(commentCreate).not.toHaveBeenCalled();
+  });
+
+  it("saves a retest on the original Live issue as a comment without changing workflow state", async () => {
+    organisationOf.mockResolvedValue("organisation-zedu");
+    vi.mocked(resolveSessionUserId).mockResolvedValue({ userId: "user-1" });
+    (requireUser as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "user-1", role: "user" });
+    const issue = { id: "bug-1", status: "resolved", isDeleted: false, title: "Save still fails", reporterId: "user-2", assigneeId: null, organisationId: "organisation-zedu", projectId: "project-zedu", pullRequestUrl: null };
+    bugFindUnique.mockResolvedValue(issue);
+    commentCreate.mockResolvedValue({ id: "comment123" });
+    bugActivityCreate.mockResolvedValue({});
+    bugUpdate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => Object.assign(issue, data));
+    userFindUnique.mockResolvedValue({ name: "Requester" });
+    const request = form({
+      operatingSystem: "Not sure",
+      installedVersion: "",
+      currentBehavior: "The save button still does nothing after I restart.",
+    });
+
+    await expect(requestRetestAction("bug-1", request)).resolves.toMatchObject({ ok: true, commentId: "comment123" });
+    expect(commentCreate.mock.calls[0][0].data).toMatchObject({
+      bugId: "bug-1",
+      authorId: "user-1",
+      body: expect.stringContaining("Installed version: Unknown"),
+    });
+    expect(commentCreate.mock.calls[0][0].data.body).toContain("The save button still does nothing after I restart.");
+    expect(bugActivityCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ bugId: "bug-1", type: "commented" }) }));
+    expect(issue.status).toBe("resolved");
+    expect(bugUpdate.mock.calls[0][0].data).toEqual({ updatedAt: expect.any(Date) });
   });
 
   it("allows direct project members to watch issues and refuses non-members", async () => {

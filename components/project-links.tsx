@@ -55,8 +55,14 @@ function LinksIcon({ size }: { size: number }) {
 const ICON_BUTTON =
   "relative inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zk-border bg-zk-surface text-zk-text2 hover:bg-zk-chip hover:text-zk-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-electric-blue";
 
-/** Beside the stage tabs, at the top right: Project notes and the project's settings, as icons only. */
-export function ProjectIconLinks({ notesHref, settingsHref }: { notesHref?: string; settingsHref?: string }) {
+/** Beside the stage tabs, at the top right: Project notes and the project's settings, as icons only. Goals are on Project Overview. */
+export function ProjectIconLinks({
+  notesHref,
+  settingsHref,
+}: {
+  notesHref?: string;
+  settingsHref?: string;
+}) {
   return (
     <>
       {notesHref ? (

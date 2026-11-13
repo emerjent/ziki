@@ -1,6 +1,6 @@
 {
   "name": "issue-tracker",
-  "version": "0.1.97",
+  "version": "0.1.153",
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
@@ -35,7 +35,8 @@
     "e2e:seed": "tsx e2e/seed.ts",
     "ziki": "tsx --tsconfig cli/tsconfig.json cli/ziki.ts",
     "test:cli": "node scripts/cli-tests.mjs",
-    "db:scenario:points-farming": "tsx --env-file=.env scripts/dev/scenario-points-farming.ts"
+    "db:scenario:points-farming": "tsx --env-file=.env scripts/dev/scenario-points-farming.ts",
+    "db:scenario:security-checks": "tsx --env-file=.env scripts/dev/scenario-security-checks.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -43,6 +44,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^1.4.0",
     "@prisma/client": "^6.19.3",
+    "@react-pdf/renderer": "4.9.0",
     "bcryptjs": "^3.0.3",
     "next": "16.4.1",
     "next-auth": "5.0.0-beta.32",
@@ -50,6 +52,7 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "server-only": "^0.0.1",
+    "tldts": "7.4.19",
     "typesense": "^3.2.0",
     "zod": "^4.6.7"
   },

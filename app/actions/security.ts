@@ -8,7 +8,7 @@ import { discloseFinding } from "@/lib/security-findings";
 
 /**
  * Security findings (#security-findings): the two decisions only a workspace
- * owner or admin makes. Disclosing a finding before its fix is live, and
+ * owner or admin makes. Publishing a finding, and
  * clearing an agent to read private findings.
  */
 
@@ -16,7 +16,7 @@ export type SecurityActionResult = { ok?: boolean; error?: string };
 
 const NOT_ALLOWED = "Only this workspace's owners and admins can do that.";
 
-/** Publishes a private finding now, instead of waiting for its fix to go live. */
+/** Publishes a private finding with explicit authorization. */
 export async function discloseFindingAction(findingId: string): Promise<SecurityActionResult> {
   const user = await requireUser();
   const finding = await prisma.securityFinding.findUnique({

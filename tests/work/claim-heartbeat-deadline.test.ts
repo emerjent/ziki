@@ -6,9 +6,10 @@ const db = vi.hoisted(() => ({
   agentApiKey: { findUnique: vi.fn() }, agentActivation: { findUnique: vi.fn() }, agentAuditEvent: { create: vi.fn() },
   agentEvent: { create: vi.fn() }, webhookSubscription: { findMany: vi.fn() },
   webhookDelivery: { createMany: vi.fn() },
+  bugActivity: { createMany: vi.fn() },
   project: { findFirst: vi.fn(), findUnique: vi.fn() },
   issueClaim: { findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), count: vi.fn(), create: vi.fn(), groupBy: vi.fn() },
-  membership: { findMany: vi.fn() },
+  membership: { findMany: vi.fn(), findUnique: vi.fn() },
   agentQuestion: { findFirst: vi.fn(), updateMany: vi.fn() },
   agentInboxItem: { findMany: vi.fn(), findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn(), create: vi.fn() },
   agent: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
@@ -33,11 +34,12 @@ import { agentIssueRequest } from "@/lib/agent-api/issues";
 import { currentHold } from "@/lib/issue-holders";
 import { staleHold } from "@/lib/agent-api/stale-hold";
 import { classifyAgentStatus, isClaimStalled } from "@/lib/dashboard-overview";
+import { loadAgentStuckContext } from "@/app/(app)/agent/[username]/data";
 
 const now = new Date("2026-10-19T12:00:00Z");
 const cutoff = new Date(now.getTime() - DEFAULT_PROJECT_WORKFLOW.heartbeatMinutes * 60 * 1000);
 const stale = new Date(cutoff.getTime() - 1);
-const claim = { id: "claim", bugId: "issue", agentId: "agent", beneficiaryUserId: "owner", status: "active", releasedAt: null, claimedAt: stale, lastHeartbeatAt: stale };
+const claim = { id: "claim", bugId: "issue", agentId: "agent", beneficiaryUserId: "owner", status: "active", releasedAt: null, claimedAt: stale, lastHeartbeatAt: stale, bug: { pullRequestUrl: null, project: { ownerWaitCapMinutes: null }, assignee: { name: "Owner" } } };
 const context = { params: Promise.resolve({ id: "issue" }) };
 function request(query = "?projectId=project", key = true) {
   return new NextRequest(`http://localhost/api/v1/issues/issue/heartbeat${query}`, { method: "POST", headers: key ? { authorization: "Bearer ziki_test" } : {} });
@@ -59,6 +61,7 @@ beforeEach(() => {
   db.issueClaim.count.mockResolvedValue(0);
   db.issueClaim.create.mockResolvedValue({ id: "claim-next", bugId: "issue", offeredAt: now });
   db.issueClaim.groupBy.mockResolvedValue([]);
+  db.bugActivity.createMany.mockResolvedValue({ count: 2 });
   db.agentInboxItem.findMany.mockResolvedValue([]);
   db.agent.findFirst.mockResolvedValue({ id: "agent", pausedAt: null });
   db.agent.findMany.mockResolvedValue([]);
@@ -107,6 +110,10 @@ describe("stale claim release", () => {
       payload: expect.objectContaining({ claimId: "claim", issueId: "issue", projectId: "project", beneficiaryUserId: "owner", reason: "silence" }),
     }) }));
     expect(db.bug.updateMany).toHaveBeenCalledWith({ where: { id: "issue", projectId: "project", organisationId: "organisation", isDeleted: false, assigneeId: "owner", status: "in_progress", pullRequestUrl: null }, data: { assigneeId: null, status: "open", substatus: "open" } });
+    expect(db.bugActivity.createMany).toHaveBeenCalledWith({ data: expect.arrayContaining([
+      expect.objectContaining({ bugId: "issue", actorId: "admin", type: "assignee_changed", metadata: { field: "assignee", from: "owner", to: null } }),
+      expect.objectContaining({ bugId: "issue", actorId: "admin", type: "status_changed", metadata: { field: "status", from: "in_progress", to: "open" } }),
+    ]) });
     expect(db.agentAuditEvent.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: "claim.released", agentId: "agent", actorUserId: "admin", bugId: "issue", payload: { claimId: "claim", reason: "silence", projectId: "project" } }) });
     expect(mocks.notifyLater).toHaveBeenCalledWith({
       kind: "status_changed", actorId: "ziki-system", actorName: "Ziki", bugId: "issue", bugTitle: "Bug", reporterId: "reporter", from: "in_progress", to: "open",
@@ -119,6 +126,12 @@ describe("stale claim release", () => {
     expect(db.issueClaim.update).not.toHaveBeenCalled();
     expect(db.bug.updateMany).not.toHaveBeenCalled();
     expect(db.agentEvent.create).not.toHaveBeenCalled();
+  });
+  it("does not log a reopen when the guarded issue update no longer matches", async () => {
+    db.bug.updateMany.mockResolvedValueOnce({ count: 0 });
+    expect(await releaseStaleClaims("project")).toEqual({ released: 1 });
+    expect(db.bugActivity.createMany).not.toHaveBeenCalled();
+    expect(mocks.notifyLater).not.toHaveBeenCalled();
   });
   it.each([cutoff, new Date(cutoff.getTime() + 1), now])("keeps a heartbeat at or after the 15-minute boundary (%s)", async (lastHeartbeatAt) => {
     db.issueClaim.findFirst.mockResolvedValueOnce({ ...claim, lastHeartbeatAt });
@@ -222,6 +235,95 @@ describe("agent status for its owner", () => {
     expect(isClaimStalled({ ...claim, deliverBy: new Date(now.getTime() - 60_000) })).toBe(true);
     expect(isClaimStalled({ ...claim, quiet: true, pullRequestUrl: "https://github.com/o/r/pull/1" })).toBe(false);
     expect(isClaimStalled({ ...claim, quiet: true, waitingOnOwnerSince: now })).toBe(false);
+  });
+
+  it("ignores another organisation's issue-linked question while showing this organisation's stuck issue", async () => {
+    const heartbeat = new Date(now.getTime() - 20 * 60_000);
+    db.membership.findUnique.mockResolvedValue({ userId: "member" });
+    db.agent.findFirst.mockResolvedValueOnce({
+      // The organisation-scoped Prisma selection excludes issue-linked questions from other organisations.
+      questions: [],
+      claims: [{
+        claimedAt: heartbeat,
+        lastHeartbeatAt: heartbeat,
+        deliverBy: new Date(now.getTime() + 60 * 60_000),
+        waitingOnOwnerSince: null,
+        bug: {
+          number: 42,
+          title: "Stalled work",
+          status: "in_progress",
+          isDeleted: false,
+          pullRequestUrl: null,
+          project: { slug: "platform", organisation: { slug: "acme" } },
+        },
+      }],
+    });
+
+    await expect(loadAgentStuckContext({
+      agentId: "agent",
+      organisationId: "organisation",
+      viewer: { id: "member" },
+      now,
+    })).resolves.toMatchObject({
+      summary: "No word on #42 for 20 min",
+      issue: { number: 42, title: "Stalled work", href: "/acme/platform/42" },
+      lastHeartbeatAt: heartbeat,
+      deadlinePassed: false,
+    });
+    expect(db.agent.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "agent",
+        activations: { some: { organisationId: "organisation", deactivatedAt: null } },
+      }),
+      select: expect.objectContaining({
+        questions: expect.objectContaining({
+          where: {
+            answeredAt: null,
+            OR: [{ bug: { organisationId: "organisation" } }, { bugId: null }],
+          },
+        }),
+        claims: expect.objectContaining({ where: expect.objectContaining({ bug: { organisationId: "organisation" } }) }),
+      }),
+    }));
+  });
+
+  it("lets an unanswered unlinked question in this organisation take precedence over a stuck claim", async () => {
+    db.membership.findUnique.mockResolvedValue({ userId: "member" });
+    db.agent.findFirst.mockResolvedValueOnce({
+      questions: [{ id: "unlinked-question" }],
+      claims: [{
+        claimedAt: stale,
+        lastHeartbeatAt: stale,
+        deliverBy: new Date(now.getTime() + 60 * 60_000),
+        waitingOnOwnerSince: null,
+        bug: {
+          number: 42,
+          title: "Stalled work",
+          status: "in_progress",
+          isDeleted: false,
+          pullRequestUrl: null,
+          project: { slug: "platform", organisation: { slug: "acme" } },
+        },
+      }],
+    });
+
+    await expect(loadAgentStuckContext({
+      agentId: "agent",
+      organisationId: "organisation",
+      viewer: { id: "member" },
+      now,
+    })).resolves.toBeNull();
+  });
+
+  it("does not read stuck issue details for a non-member", async () => {
+    db.membership.findUnique.mockResolvedValue(null);
+    await expect(loadAgentStuckContext({
+      agentId: "agent",
+      organisationId: "organisation",
+      viewer: { id: "guest" },
+      now,
+    })).resolves.toBeNull();
+    expect(db.agent.findFirst).not.toHaveBeenCalled();
   });
 });
 

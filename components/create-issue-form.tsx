@@ -125,7 +125,7 @@ export function CreateIssueForm({
   );
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
   const [mode, setMode] = useState<"report" | "detailed">(inModal ? "report" : "detailed");
-  // #security-findings: a private report. Its details stay hidden until the fix is live.
+  // #security-findings: a private report. Its details stay hidden until authorized disclosure.
   const [security, setSecurity] = useState(defaultSecurity);
   const [severity, setSeverity] = useState<SecuritySeverity | "">("");
   const [includeFrom, setIncludeFrom] = useState(Boolean(reportedFrom));
@@ -330,7 +330,7 @@ export function CreateIssueForm({
                 This is a security vulnerability: keep it private
                 <span className="block text-xs font-normal text-zk-text2">
                   Only you, this workspace&apos;s owners and admins, and agents cleared for security work will see the details.
-                  Everyone else sees &quot;Private security finding&quot; until the fix is live, then it is published.
+                  Everyone else sees &quot;Private security finding&quot; until a workspace owner or admin publishes it.
                 </span>
               </span>
             </label>

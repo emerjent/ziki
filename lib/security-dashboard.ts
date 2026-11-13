@@ -1,6 +1,6 @@
-import type { SecuritySeverity, Status, Substatus } from "@prisma/client";
+import type { Prisma, SecuritySeverity, Status, Substatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { canViewFinding, daysBetween, discloseLiveFindings, type FindingViewer } from "@/lib/security-findings";
+import { canViewFinding, daysBetween, type FindingViewer } from "@/lib/security-findings";
 import { SECURITY_SEVERITIES } from "@/lib/security-severity";
 import { refOf, ideaPath, type ProjectRef } from "@/lib/project-paths";
 import { issuePath } from "@/lib/issue-ref";
@@ -38,7 +38,7 @@ export type SecurityDashboard = {
   disclosed: DashboardFinding[];
   openBySeverity: Record<SecuritySeverity, number>;
   /** Median days from report to fix for findings disclosed because their fix went live; null with none. */
-  medianDaysToFix: number | null;
+  medianDaysToDisclosure: number | null;
   projects: { name: string; ref: ProjectRef }[];
 };
 
@@ -59,13 +59,40 @@ export function median(values: number[]): number | null {
   return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }
 
-export async function loadSecurityDashboard(organisationId: string, viewer: FindingViewer, now: Date = new Date()): Promise<SecurityDashboard> {
-  // A finding whose fix went live since the last sweep is published before the page reads it.
-  await discloseLiveFindings({ organisationId });
+export type SecuritySearch = { q: string; project: string; assignee: string; reporter: string };
+
+export async function loadSecurityDashboard(organisationId: string, viewer: FindingViewer, now: Date = new Date(), search?: SecuritySearch): Promise<SecurityDashboard> {
+  const filters: Prisma.SecurityFindingWhereInput[] = [];
+  if (search && (search.q || search.project || search.assignee || search.reporter)) {
+    // Filter only findings whose details the dashboard viewer may read.
+    if (viewer.kind === "person" && !viewer.organisationAdmin) {
+      filters.push({ OR: [{ disclosedAt: { not: null } }, { reporterId: viewer.userId }] });
+    }
+    if (viewer.kind === "agent" && !viewer.securityCleared) {
+      filters.push({ OR: [{ disclosedAt: { not: null } }, { reporterId: viewer.ownerId }] });
+    }
+    if (search.q) {
+      const number = Number(search.q.replace(/^#/, ""));
+      const numberMatches = Number.isInteger(number) && number > 0 && number <= 2147483647
+        ? [{ bug: { number } }, { idea: { number } }]
+        : [];
+      filters.push({ OR: [{ id: search.q }, { title: { contains: search.q, mode: "insensitive" } }, ...numberMatches] });
+    }
+    if (search.project) filters.push({ project: { slug: search.project } });
+    if (search.assignee === "unassigned") {
+      filters.push({ OR: [{ bugId: null }, { bug: { assigneeId: null } }] });
+    } else if (search.assignee) {
+      filters.push({ bug: { assignee: { name: { contains: search.assignee, mode: "insensitive" } } } });
+    }
+    if (search.reporter === "agent") filters.push({ idea: { createdByAgentId: { not: null } } });
+    if (search.reporter === "person") filters.push({ OR: [{ ideaId: null }, { idea: { createdByAgentId: null } }] });
+  }
+
   const [rows, projects] = await Promise.all([
     prisma.securityFinding.findMany({
       where: {
         organisationId,
+        AND: filters,
         // A deleted issue or idea takes its finding off the page.
         OR: [{ bug: { isDeleted: false } }, { bugId: null, idea: { isDeleted: false } }],
       },
@@ -117,7 +144,7 @@ export async function loadSecurityDashboard(organisationId: string, viewer: Find
     open,
     disclosed,
     openBySeverity,
-    medianDaysToFix: median(disclosed.filter((finding) => finding.fixedLive).map((finding) => finding.days)),
+    medianDaysToDisclosure: median(disclosed.map((finding) => finding.days)),
     projects: projects.map((project) => ({ name: project.name, ref: refOf(project) })),
   };
 }

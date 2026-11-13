@@ -21,9 +21,8 @@ export { SECURITY_SEVERITIES, SEVERITY_GUIDE, SEVERITY_LABEL, isSecuritySeverity
  * - the workspace's owners and admins, and the site super admin,
  * - agents a workspace owner or admin cleared for security work.
  *
- * Once the fix is live (the issue reaches Live) the finding is disclosed: the
- * real text is copied onto the idea and the issue, and everyone can read it.
- * An owner or admin can also disclose it earlier.
+ * When an owner or admin publishes the finding, the real text is copied onto
+ * the idea and issue, where everyone can read it.
  */
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -37,11 +36,11 @@ export function placeholderTitle(severity: SecuritySeverity): string {
 export const PLACEHOLDER_DESCRIPTION = [
   "This is a private security finding. Its details are visible only to the person who reported it, the workspace's owners and admins, and agents cleared for security work.",
   "",
-  "They are published here automatically once the fix is live.",
+  "Only a workspace owner or admin can publish them.",
 ].join("\n");
 
 /** The summary every idea and issue of a private finding carries instead of the real one. */
-export const PLACEHOLDER_SUMMARY = "Private security finding. The details are restricted until the fix is live.";
+export const PLACEHOLDER_SUMMARY = "Private security finding. The details are restricted until authorized disclosure.";
 
 /** Who is asking. A person in the web app, or an agent through the API. */
 export type FindingViewer =
@@ -159,10 +158,10 @@ export async function createFinding(db: Db, input: NewFinding): Promise<{ id: st
 /**
  * Makes a finding public: copies its real title, summary and description onto
  * the idea and the issue, moves its evidence files onto them, and records when
- * and by whom. `byUserId` is null when it is disclosed because the fix went live.
+ * and by whom.
  * Disclosing twice does nothing.
  */
-export async function discloseFinding(db: Prisma.TransactionClient, findingId: string, byUserId: string | null): Promise<boolean> {
+export async function discloseFinding(db: Prisma.TransactionClient, findingId: string, byUserId: string): Promise<boolean> {
   const finding = await db.securityFinding.findUnique({
     where: { id: findingId },
     select: { id: true, organisationId: true, projectId: true, ideaId: true, bugId: true, severity: true, title: true, summary: true, description: true, disclosedAt: true },
@@ -187,29 +186,11 @@ export async function discloseFinding(db: Prisma.TransactionClient, findingId: s
       issueId: finding.bugId,
       ideaId: finding.ideaId,
       severity: finding.severity,
-      reason: byUserId ? "disclosed_early" : "fix_live",
-      ...(byUserId ? { actor: { kind: "user", id: byUserId } } : {}),
+      reason: "authorized_disclosure",
+      actor: { kind: "user", id: byUserId },
     },
   });
   return true;
-}
-
-/**
- * Discloses every private finding whose issue is Live (#security-findings).
- * Runs with the platform sweeps and whenever the Security page loads, so a
- * finding goes public soon after its fix is live, whichever route made it Live.
- */
-export async function discloseLiveFindings(options: { organisationId?: string } = {}, db: PrismaClient = prisma): Promise<number> {
-  const due = await db.securityFinding.findMany({
-    where: { disclosedAt: null, ...(options.organisationId ? { organisationId: options.organisationId } : {}), bug: { status: "resolved", isDeleted: false } },
-    select: { id: true },
-    take: 200,
-  });
-  let disclosed = 0;
-  for (const row of due) {
-    if (await db.$transaction((tx) => discloseFinding(tx, row.id, null))) disclosed += 1;
-  }
-  return disclosed;
 }
 
 /**
@@ -223,7 +204,7 @@ export async function isPrivateFinding(target: { bugId: string } | { ideaId: str
 }
 
 export const PRIVATE_FINDING_EDIT_MESSAGE =
-  "This is a private security finding: its title and description stay a placeholder until the fix is live, so they can't be edited here.";
+  "This is a private security finding: its title and description stay a placeholder until authorized disclosure, so they can't be edited here.";
 
 /** How long a fixed finding took, from report to Live, in whole days (at least 0). */
 export function daysBetween(from: Date, to: Date): number {

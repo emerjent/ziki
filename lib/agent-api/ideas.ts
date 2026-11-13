@@ -35,9 +35,6 @@ import { convertVettedIdea } from "@/lib/agent-api/idea-verdicts";
 import { agentFindingViewer, createFinding, findingForIdea, placeholderTitle, type FindingViewer, PLACEHOLDER_DESCRIPTION, PLACEHOLDER_SUMMARY, SECURITY_SEVERITIES } from "@/lib/security-findings";
 import { difficultySchema } from "@/lib/difficulty";
 
-/** How many ideas one person's agents may file as already vetted in 24 hours. */
-export const VETTED_IDEAS_PER_DAY = 5;
-
 /**
  * Ideas through the agent API (#idea-table). Every report is an idea: an
  * agent files one with `POST /api/v1/ideas`, people and agents give it
@@ -61,7 +58,7 @@ export const createIdeaSchema = createBugSchema
     track: z.unknown().optional(),
     rationale: z.unknown().optional(),
     acknowledgeSimilar: z.unknown().optional(),
-    /** The owner says this idea was already vetted elsewhere: it becomes an issue at once (needs `vettedNote`). */
+    /** The owner says this idea was already vetted elsewhere: it becomes an issue at once, held by this agent, In progress (needs `vettedNote`). */
     alreadyVetted: z.boolean().optional(),
     /** Where and by whom it was approved, for example "Approved by Mark, sheet row 42". Shown on the issue. */
     vettedNote: z.string().trim().min(5).max(300).optional(),
@@ -73,7 +70,7 @@ export const createIdeaSchema = createBugSchema
     /**
      * #security-findings: file it as a private security finding. The idea and its issue show a
      * placeholder; the title, summary, description and files are readable only by the owner,
-     * workspace owners and admins and security-cleared agents until the fix is live.
+     * workspace owners and admins and security-cleared agents until authorized disclosure.
      */
     security: z.object({ severity: z.enum(SECURITY_SEVERITIES) }).strict().optional(),
   })
@@ -87,6 +84,7 @@ export const ideaSelect = {
   title: true,
   summary: true,
   description: true,
+  source: true,
   track: true,
   rationale: true,
   status: true,
@@ -350,7 +348,7 @@ async function createIdeaFromBody(agent: AgentContext, request: NextRequest, bod
   assertVettedFields(input);
   const scope = await issueProject(agent, request.nextUrl.searchParams, input.projectId);
   const beneficiaryUserId = agent.ownerId;
-  let converted: { issueId: string; issueNumber: number } | null = null;
+  let converted: { issueId: string; issueNumber: number; claimId: string; claimStatus: "active" | "planning"; deliverBy: string | null } | null = null;
   const requestHash = hashCreateRequest({
     projectId: scope.projectId,
     beneficiaryUserId,
@@ -388,7 +386,6 @@ async function createIdeaFromBody(agent: AgentContext, request: NextRequest, bod
         select: { userId: true },
       });
       if (!member) throw new IssueApiError(422, "The beneficiary must be a member of the organisation.");
-      if (input.alreadyVetted) await assertVettedCap(tx, agent);
       const areaId = input.areaId || null;
       if (areaId) {
         const area = await tx.projectArea.findFirst({ where: { id: areaId, projectId: scope.projectId }, select: { id: true } });
@@ -443,7 +440,7 @@ async function createIdeaFromBody(agent: AgentContext, request: NextRequest, bod
       if (input.alreadyVetted && input.vettedNote) {
         await audit(agent, "idea.vetted", `idea:${idea.id}`, { vettedNote: input.vettedNote, number: idea.number }, { db: tx });
         const made = await convertVettedIdea(tx, agent, scope.projectId, idea.id, input.vettedNote, input.difficulty ?? "medium");
-        converted = { issueId: made.issueId, issueNumber: made.issueNumber };
+        converted = { issueId: made.issueId, issueNumber: made.issueNumber, claimId: made.claimId, claimStatus: made.claimStatus, deliverBy: made.deliverBy };
       }
       return idea;
     },
@@ -463,17 +460,5 @@ export function assertVettedFields(input: { alreadyVetted?: boolean; vettedNote?
   if (input.vettedNote && !input.alreadyVetted) {
     const message = "vettedNote is only for an idea sent with alreadyVetted: true.";
     throw new IssueApiError(400, message, { error: "invalid_request", message, field: "alreadyVetted" });
-  }
-}
-
-/** One person's agents may file `VETTED_IDEAS_PER_DAY` already-vetted ideas in 24 hours: an honest flag, not a way round the verdicts. */
-export async function assertVettedCap(tx: Prisma.TransactionClient, agent: AgentContext) {
-  await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${agent.ownerId} FOR UPDATE`;
-  const used = await tx.agentAuditEvent.count({
-    where: { action: "idea.vetted", undoneAt: null, createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }, agent: { ownerUserId: agent.ownerId } },
-  });
-  if (used >= VETTED_IDEAS_PER_DAY) {
-    const message = `You can file ${VETTED_IDEAS_PER_DAY} already vetted ideas in 24 hours, and they are used up. Send this one without alreadyVetted and it waits for verdicts as usual.`;
-    throw new IssueApiError(429, message, { error: "vetted_limit", message, limit: VETTED_IDEAS_PER_DAY });
   }
 }

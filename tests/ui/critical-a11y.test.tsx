@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 "use client";
 
+import Link from "next/link";
+
 import axe from "axe-core";
 import { NewMarketingTaskForm } from "@/components/marketing/tasks/new-marketing-task-form";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { labelInNameMismatches } from "@/lib/a11y/label-in-name";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarketingSettings } from "@/components/marketing/settings/settings";
 import { EntryReplyForm } from "@/components/entry-reply-form";
 import { CreateBugForm } from "@/components/create-issue-form";
@@ -28,6 +30,14 @@ import { getPageGuidance, searchSupportAnswers } from "@/components/support-guid
 import { ActiveSessions } from "@/components/active-sessions";
 import { LoginHistory } from "@/components/login-history";
 import { projectRef } from "@/lib/project-paths";
+import { AgentSideCard, type AgentProfileData } from "@/app/(app)/agent/[username]/agent-profile";
+import { RepositoryReadiness } from "@/components/repository-readiness";
+import RepositoryReadinessLoading from "@/app/(app)/projects/readiness/loading";
+import RepositoryReadinessError from "@/app/(app)/projects/readiness/error";
+import { checkDelivery, recheckRepositories } from "@/app/(app)/projects/readiness/actions";
+import type { DeliveryReadinessResult, ReadinessResult } from "@/lib/github/repository-readiness-types";
+
+vi.mock("@/app/(app)/projects/readiness/actions", () => ({ checkDelivery: vi.fn(), recheckRepositories: vi.fn() }));
 
 vi.mock("@/app/actions/settings", () => ({
   signOutSessionAction: vi.fn(async () => ({ ok: true })),
@@ -106,6 +116,110 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("repository readiness administration", () => {
+  const initial: ReadinessResult = { ok: true, report: { organisationId: "org1", checkedAt: "2026-11-07T10:00:00.000Z", projects: [{
+    id: "p1", name: "Mobile", slug: "mobile", repositories: [{ label: "Main repository", name: "acme/mobile", url: "https://github.com/acme/mobile", defaultBranch: "main", deliveryBranch: "main", checks: [
+      { key: "repository", code: "repository_exists", state: "pass", message: "Repository is accessible on GitHub." },
+    ] }], deliveries: [],
+  }] } };
+  const wrongDelivery: DeliveryReadinessResult = { ok: true, delivery: { url: "https://github.com/acme/desktop/pull/9", check: { key: "delivery repository", state: "fail", code: "wrong_repository", message: "Delivery would fail with 422 wrong_repository." } } };
+  beforeEach(() => {
+    vi.mocked(recheckRepositories).mockReset();
+    vi.mocked(checkDelivery).mockReset();
+  });
+
+  it("announces initial loading and exposes no delivery controls before a report exists", () => {
+    render(<RepositoryReadinessLoading />);
+    expect(screen.getByRole("status")).toHaveTextContent(/Checking/);
+    expect(screen.queryByRole("button", { name: "Check delivery" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer a delivery check for an empty organisation", () => {
+    render(<RepositoryReadiness initial={{ ok: true, report: { organisationId: "org1", checkedAt: "2026-11-07T10:00:00.000Z", projects: [] } }} />);
+    expect(screen.getByRole("heading", { name: "No active projects" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open projects" })).toHaveAttribute("href", "/home");
+    expect(screen.queryByLabelText("Pull request URL")).not.toBeInTheDocument();
+  });
+
+  it("recovers from an initial error through Recheck", async () => {
+    vi.mocked(recheckRepositories).mockResolvedValue(initial);
+    render(<RepositoryReadiness initial={{ ok: false, error: "Could not load repository readiness." }} />);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Recheck" }));
+    expect(await screen.findByRole("heading", { name: "Mobile" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Pull request URL")).toBeEnabled();
+  });
+
+  it("preserves previous evidence while refreshing, locks duplicate requests and then replaces the report", async () => {
+    let finish!: (value: ReadinessResult) => void;
+    vi.mocked(recheckRepositories).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    render(<RepositoryReadiness initial={initial} />);
+    const button = screen.getByRole("button", { name: "Recheck" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(screen.getByRole("status")).toHaveTextContent("Previous results remain");
+    expect(screen.getByRole("heading", { name: "Mobile" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check delivery" })).toBeDisabled();
+    expect(recheckRepositories).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ ok: true, report: { ...initial.report, projects: [] } }));
+    expect(screen.queryByRole("heading", { name: "Mobile" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No active projects" })).toBeInTheDocument();
+  });
+
+  it("retains previous results on refresh failure and allows retry", async () => {
+    vi.mocked(recheckRepositories).mockRejectedValueOnce(new Error("private details")).mockResolvedValueOnce(initial);
+    render(<RepositoryReadiness initial={initial} />);
+    fireEvent.click(screen.getByRole("button", { name: "Recheck" }));
+    expect(await screen.findByRole("alert")).not.toHaveTextContent("private details");
+    expect(screen.getByRole("heading", { name: "Mobile" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Recheck" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("reports a safe server-side refresh error without discarding the previous report", async () => {
+    vi.mocked(recheckRepositories).mockResolvedValue({ ok: false, error: "Could not load repository readiness. Recheck to try again." });
+    render(<RepositoryReadiness initial={initial} />);
+    fireEvent.click(screen.getByRole("button", { name: "Recheck" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Recheck to try again");
+    expect(screen.getByRole("heading", { name: "Mobile" })).toBeInTheDocument();
+  });
+
+  it("locks delivery checks against double submission and shows the wrong-repository evidence", async () => {
+    let finish!: (value: DeliveryReadinessResult) => void;
+    vi.mocked(checkDelivery).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    render(<RepositoryReadiness initial={initial} />);
+    fireEvent.change(screen.getByLabelText("Pull request URL"), { target: { value: "https://github.com/acme/desktop/pull/9" } });
+    const form = screen.getByLabelText("Pull request URL").closest("form")!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(screen.getByRole("button", { name: "Recheck" })).toBeDisabled();
+    expect(screen.getByLabelText("Pull request URL")).toBeDisabled();
+    expect(checkDelivery).toHaveBeenCalledExactlyOnceWith({ projectId: "p1", pullRequestUrl: "https://github.com/acme/desktop/pull/9" });
+    await act(async () => finish(wrongDelivery));
+    expect(screen.getByRole("alert")).toHaveTextContent("422 wrong_repository");
+    expect(screen.getByRole("button", { name: "Check delivery" })).toBeEnabled();
+  });
+
+  it("recovers from a delivery failure without exposing a thrown error", async () => {
+    vi.mocked(checkDelivery).mockRejectedValueOnce(new Error("private details")).mockResolvedValueOnce({ ok: true, delivery: { url: "https://github.com/acme/mobile/pull/9", check: { key: "delivery", state: "pass", code: "delivery_ready", message: "Repository and installation verified." } } });
+    render(<RepositoryReadiness initial={initial} />);
+    fireEvent.change(screen.getByLabelText("Pull request URL"), { target: { value: "https://github.com/acme/mobile/pull/9" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check delivery" }));
+    expect(await screen.findByRole("alert")).not.toHaveTextContent("private details");
+    fireEvent.click(screen.getByRole("button", { name: "Check delivery" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Repository and installation verified");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("lets a failed route retry through its error boundary", () => {
+    const retry = vi.fn();
+    render(<RepositoryReadinessError retry={retry} />);
+    fireEvent.click(screen.getByRole("button", { name: "Recheck" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+});
+
 /** Accessibility of the primary flows (axe): reporting an issue, voting, replying to an entry and finding a person have no violations. */
 /**
  * axe-core needs a layout engine for two checks, and jsdom has none:
@@ -140,6 +254,44 @@ async function expectNoA11yViolations(node: HTMLElement) {
 const users = [{ id: "u1", name: "Alice", role: "user" as const }];
 
 describe("component accessibility (axe)", { timeout: 30000 }, () => {
+  it("shows the stuck context first in an agent profile sidebar and omits it when the agent is not stuck", () => {
+    const agent: AgentProfileData = {
+      id: "agent-1", name: "Build agent", model: "Test model", avatar: null, level: "working", revokedAt: null,
+      createdAt: new Date("2026-11-01T00:00:00Z"), ownerName: null, lastActiveAt: null, activeNow: false,
+      organisations: ["Acme"], counts: { filed: 0, claims: 1, comments: 0, delivered: 0 }, reputation: 0,
+      username: "build-agent", tagline: null, about: null, services: null, rating: null, pictureUrl: null, skills: [],
+    };
+    const stuckContext = {
+      summary: "No word on #42 Fix the login for 20 min",
+      issue: { number: 42, title: "Fix the login", href: "/acme/platform/42" },
+      lastHeartbeatAt: new Date("2026-11-07T10:00:00Z"),
+      deliverBy: null,
+      deadlinePassed: false,
+    };
+    const { container, rerender } = render(
+      <AgentSideCard
+        agent={agent}
+        stuckContext={stuckContext}
+        editControl={<Link href="/edit">Edit Profile</Link>}
+        keyPanel={<Link href="/connect">Connect Agent</Link>}
+        showActivity
+        blocked
+      />,
+    );
+    const sidebar = container.querySelector("aside");
+    expect(sidebar?.firstElementChild).toHaveAttribute("aria-label", "Stuck status");
+    expect(sidebar?.children[1]).toHaveTextContent("Edit Profile");
+    expect(sidebar?.children[2]).toHaveTextContent("Connect Agent");
+    expect(sidebar?.children[3]).toHaveTextContent("See its activity");
+    expect(sidebar?.children[4]).toHaveTextContent("Not allowed to work yet");
+    expect(screen.getByText(stuckContext.summary)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "#42 Fix the login" })).toHaveAttribute("href", stuckContext.issue.href);
+    expect(screen.getByRole("link", { name: "Open issue" })).toHaveAttribute("href", stuckContext.issue.href);
+    expect(screen.getByText(/Last heard from/)).toBeInTheDocument();
+
+    rerender(<AgentSideCard agent={agent} />);
+    expect(screen.queryByRole("status", { name: "Stuck status" })).not.toBeInTheDocument();
+  });
   it("keeps the new marketing task form accessible, with and without task types", async () => {
     const withTypes = render(<NewMarketingTaskForm projectId="project-1" types={[{ id: "blog", name: "Blog post" }]} />);
     await expectNoA11yViolations(withTypes.container);
@@ -149,7 +301,7 @@ describe("component accessibility (axe)", { timeout: 30000 }, () => {
   });
   it("keeps approved-work selection and attachment actions accessible", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
-    const { container } = render(<Library slug={projectRef("acme", "acme")} projectName="Acme" initial={{ ok: true, items: [{
+    const { container } = render(<Library slug={projectRef("acme", "acme")} initial={{ ok: true, items: [{
       id: "published", number: 42, title: "Welcome email", agent: "Content agent", summary: "An approved email sequence.", publishedAt: "2026-11-04T12:00:00Z",
       deliveryId: "del_published", category: "Content & Editorial", taskType: "Email or newsletter", deliveryStatus: "live_published", publishedUrls: [], implementedAt: null, implementedByName: null,
       files: deliveryFiles(["https://example.com/welcome.docx"]),
@@ -163,10 +315,10 @@ describe("component accessibility (axe)", { timeout: 30000 }, () => {
       types: [{ id: "blog", name: "Blog post", description: null, isActive: true, usage: 1 }],
       brief: { product: "Acme", audience: "", currentFocus: "", outOfScope: "" },
     };
-    const admin = render(<MarketingSettings slug={projectRef("acme", "acme")} projectName="Acme" data={data} />);
+    const admin = render(<MarketingSettings slug={projectRef("acme", "acme")} data={data} />);
     await expectNoA11yViolations(admin.container);
     admin.unmount();
-    const member = render(<MarketingSettings slug={projectRef("acme", "acme")} projectName="Acme" data={{ ...data, canManage: false }} />);
+    const member = render(<MarketingSettings slug={projectRef("acme", "acme")} data={{ ...data, canManage: false }} />);
     await expectNoA11yViolations(member.container);
   });
 
@@ -198,7 +350,7 @@ describe("component accessibility (axe)", { timeout: 30000 }, () => {
       status: "rejected", rejectedAt: new Date("2026-11-05"), rejectedBy: "a manager agent", archivedAt: null, archivedBy: null,
       archiveReason: null,
     };
-    const { container } = render(<RejectedIdeas slug={projectRef("acme", "acme")} projectName="Acme" initial={{ ok: true, items: [item], total: 1, page: 1, totalPages: 1, from: 1, to: 1 }} />);
+    const { container } = render(<RejectedIdeas slug={projectRef("acme", "acme")} initial={{ ok: true, items: [item], total: 1, page: 1, totalPages: 1, from: 1, to: 1 }} />);
     await expectNoA11yViolations(container);
   });
   it("keeps a marketing task's deliverables and reviews accessible, full and empty", async () => {
@@ -464,7 +616,7 @@ describe("component accessibility (axe)", { timeout: 30000 }, () => {
       const guide = screen.getByRole("complementary", { name: "Customer Support Guide" });
       expect(guide).toBeInTheDocument();
 
-      const toggleBtn = screen.getByRole("button", { name: /Ask support/ });
+      const toggleBtn = screen.getByRole("button", { name: /ask support/i });
       expect(toggleBtn).toBeInTheDocument();
 
       fireEvent.click(toggleBtn);

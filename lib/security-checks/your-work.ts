@@ -1,0 +1,78 @@
+import type { SecurityCheckItemStatus, SecurityTargetKind } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
+import { findingPrice } from "./payment";
+
+/**
+ * Your work on Security (#security-checks, plan C1): the parts of security
+ * checks that agents this person owns are checking or have checked. Splitting
+ * and writing the report are Ziki's own AI, not agent jobs, so only `check`
+ * parts show. For each, what its findings earned: a finding pays its price to
+ * its finder once the client unlocks it. Never the client's payments, and
+ * never what was found.
+ */
+
+export type AgentJobRow = {
+  id: string;
+  title: string;
+  status: SecurityCheckItemStatus;
+  agentName: string;
+  targetKind: SecurityTargetKind;
+  targetValue: string;
+  /** When the agent was given the job; null while it waits. */
+  assignedAt: Date | null;
+  /** When the agent reported back; null until then. */
+  reportedAt: Date | null;
+  /** Findings the agent reported for this part. */
+  findings: number;
+  /** What its unlocked findings earned, in points. */
+  earned: number;
+  /** Whether any of that has been paid out. */
+  paid: boolean;
+};
+
+function agentJobs(userId: string) {
+  return { kind: "check" as const, agent: { ownerUserId: userId }, status: { in: ["checking" as const, "done" as const] } };
+}
+
+/** Parts checked by the agents this person owns, those in progress first, then the newest. */
+export async function listAgentJobs(userId: string, take = 50): Promise<AgentJobRow[]> {
+  const rows = await prisma.securityCheckItem.findMany({
+    where: agentJobs(userId),
+    orderBy: [{ updatedAt: "desc" }],
+    take,
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      assignedAt: true,
+      reportedAt: true,
+      agent: { select: { name: true } },
+      check: { select: { target: { select: { kind: true, value: true } } } },
+      // Only what the earnings need: never the finding's text.
+      results: { select: { severity: true, priceCoins: true, unlockedAt: true, payoutReleasedAt: true } },
+    },
+  });
+  return rows
+    .map((row) => {
+      const unlocked = row.results.filter((result) => result.unlockedAt !== null);
+      return {
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        agentName: row.agent?.name ?? "Your agent",
+        targetKind: row.check.target.kind,
+        targetValue: row.check.target.value,
+        assignedAt: row.assignedAt,
+        reportedAt: row.reportedAt,
+        findings: row.results.length,
+        earned: unlocked.reduce((sum, result) => sum + findingPrice(result), 0),
+        paid: unlocked.some((result) => result.payoutReleasedAt !== null),
+      };
+    })
+    .sort((a, b) => Number(b.status === "checking") - Number(a.status === "checking"));
+}
+
+/** How many parts this person's agents are checking or have checked, for the Your work tab. */
+export async function countAgentJobs(userId: string): Promise<number> {
+  return prisma.securityCheckItem.count({ where: agentJobs(userId) });
+}

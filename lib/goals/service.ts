@@ -43,6 +43,21 @@ export type GoalAllocationRecord = Prisma.GoalAllocationGetPayload<Record<string
 /** A goal row plus its computed budget projection. */
 export type GoalWithBudget = GoalRecord & { budget: GoalBudgetSummary };
 
+/**
+ * Who a goal write is attributed to: an agent's API key (the original path,
+ * which audits and tags events with the agent) or a signed-in person on the
+ * web (`app/actions/goals.ts`). Both carry the organisation the write is
+ * scoped to; only the agent path writes agent audit rows.
+ */
+export type GoalActor =
+  | { kind: "agent"; agent: AgentContext }
+  | { kind: "person"; userId: string; organisationId: string };
+
+/** The organisation any goal write is scoped to. */
+function actorOrganisationId(actor: GoalActor): string {
+  return actor.kind === "agent" ? actor.agent.organisationId : actor.organisationId;
+}
+
 const goalSelect = {
   id: true,
   organisationId: true,
@@ -99,16 +114,16 @@ function toApiError(error: PoolBudgetError): IssueApiError {
 }
 
 /**
- * Loads a goal scoped to the agent's organisation, enforcing the key's project.
+ * Loads a goal scoped to an organisation, whichever actor is writing.
  *
- * @param agent - The authenticated agent context.
+ * @param organisationId - Organisation the goal must belong to.
  * @param goalId - The goal to load.
  * @returns The selected goal row.
  * @throws {IssueApiError} 404 when no such goal exists in the organisation.
  */
-async function resolveGoal(agent: AgentContext, goalId: string): Promise<GoalRecord> {
+async function resolveGoal(organisationId: string, goalId: string): Promise<GoalRecord> {
   const goal = await prisma.goal.findFirst({
-    where: { id: goalId, organisationId: agent.organisationId },
+    where: { id: goalId, organisationId },
     select: goalSelect,
   });
   if (!goal) throw new IssueApiError(404, "Goal not found.");
@@ -116,20 +131,21 @@ async function resolveGoal(agent: AgentContext, goalId: string): Promise<GoalRec
 }
 
 /**
- * Creates a goal in `projectId` on behalf of the calling agent (#616). The
+ * Creates a goal in `projectId` on behalf of an agent or a person (#616). The
  * pool starts unfunded (`allocated = 0`), so a fresh goal is `unfunded`.
  *
- * @param agent - The authenticated agent context; its owner becomes the creator.
+ * @param actor - The agent key or signed-in person making the write.
  * @param input - A validated create payload (`createGoalSchema`).
  * @returns The created goal row.
- * @throws {IssueApiError} 404 when the agent's organisation has no such project.
+ * @throws {IssueApiError} 404 when the actor's organisation has no such project.
  */
-export async function createGoal(agent: AgentContext, input: CreateGoalInput): Promise<GoalRecord> {
+async function createGoalRow(actor: GoalActor, input: CreateGoalInput): Promise<GoalRecord> {
   const parsed = createGoalSchema.parse(input);
   const { projectId, ...fields } = parsed;
+  const organisationId = actorOrganisationId(actor);
 
   const project = await prisma.project.findFirst({
-    where: { organisationId: agent.organisationId, ...(projectId ? { id: projectId } : {}) },
+    where: { organisationId, ...(projectId ? { id: projectId } : {}) },
     orderBy: { createdAt: "asc" },
     select: { id: true, organisationId: true },
   });
@@ -140,7 +156,7 @@ export async function createGoal(agent: AgentContext, input: CreateGoalInput): P
       data: {
         organisationId: project.organisationId,
         projectId: project.id,
-        createdById: agent.ownerId,
+        createdById: actor.kind === "agent" ? actor.agent.ownerId : actor.userId,
         title: fields.title,
         description: fields.description ?? null,
         budgetPool: fields.budgetPool,
@@ -148,11 +164,13 @@ export async function createGoal(agent: AgentContext, input: CreateGoalInput): P
       select: goalSelect,
     });
 
-    await audit(agent, "goal.created", goal.id, { projectId: project.id, budgetPool: goal.budgetPool }, { db: tx });
+    if (actor.kind === "agent") {
+      await audit(actor.agent, "goal.created", goal.id, { projectId: project.id, budgetPool: goal.budgetPool }, { db: tx });
+    }
     await publish(tx, {
       organisationId: project.organisationId,
       type: "goal.created",
-      actorAgentId: agent.agentId,
+      actorAgentId: actor.kind === "agent" ? actor.agent.agentId : null,
       payload: {
         goalId: goal.id,
         projectId: project.id,
@@ -162,6 +180,19 @@ export async function createGoal(agent: AgentContext, input: CreateGoalInput): P
     });
     return goal;
   });
+}
+
+/** Creates a goal on behalf of the calling agent (#616). */
+export async function createGoal(agent: AgentContext, input: CreateGoalInput): Promise<GoalRecord> {
+  return createGoalRow({ kind: "agent", agent }, input);
+}
+
+/** Creates a goal on behalf of a signed-in person (the web goals UI). */
+export async function createGoalForPerson(
+  person: { userId: string; organisationId: string },
+  input: CreateGoalInput,
+): Promise<GoalRecord> {
+  return createGoalRow({ kind: "person", ...person }, input);
 }
 
 /**
@@ -184,18 +215,19 @@ export async function listGoals(organisationId: string, projectId: string, take 
 
 /**
  * Reads one goal with its budget summary and every allocation row (newest
- * first), for `GET /api/v1/goals/{id}`.
+ * first), for `GET /api/v1/goals/{id}`. Any scope carrying the organisation
+ * works, so the web UI reads through the same shape.
  *
- * @param agent - The authenticated agent context.
+ * @param scope - Authenticated agent context or plain organisation scope.
  * @param goalId - The goal to read.
  * @returns The goal with `budget`, plus its allocation rows.
  * @throws {IssueApiError} 404 when the goal is missing.
  */
 export async function readGoal(
-  agent: AgentContext,
+  scope: { organisationId: string },
   goalId: string,
 ): Promise<{ goal: GoalWithBudget; allocations: GoalAllocationRecord[] }> {
-  const goal = await resolveGoal(agent, goalId);
+  const goal = await resolveGoal(scope.organisationId, goalId);
   const allocations = await prisma.goalAllocation.findMany({
     where: { goalId: goal.id, releasedAt: null },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -310,20 +342,20 @@ function computeSplit(goal: GoalRecord, input: SplitGoalPoolInput): { amounts: n
  * moves. Amounts of 0 (a target that earned nothing to rounding) are not
  * written as rows.
  *
- * @param agent - The authenticated agent context.
+ * @param actor - The agent key or signed-in person making the write.
  * @param goalId - The goal whose pool to split.
  * @param input - A validated split payload (`splitGoalPoolSchema`).
  * @returns The refreshed goal with `budget`, plus all live allocations.
  * @throws {IssueApiError} 404 missing goal/targets, 400 self-funding or bad
  *   weights, 409 over-allocation, closed goal, or duplicate `sourceKey`.
  */
-export async function splitGoalPool(
-  agent: AgentContext,
+async function splitGoalPoolRow(
+  actor: GoalActor,
   goalId: string,
   input: SplitGoalPoolInput,
 ): Promise<{ goal: GoalWithBudget; allocations: GoalAllocationRecord[] }> {
   const parsed = splitGoalPoolSchema.parse(input);
-  const goal = await resolveGoal(agent, goalId);
+  const goal = await resolveGoal(actorOrganisationId(actor), goalId);
   if (goal.status !== "active") {
     throw new IssueApiError(409, "Only active goals can be split.");
   }
@@ -388,17 +420,19 @@ export async function splitGoalPool(
       select: allocationSelect,
     });
 
-    await audit(
-      agent,
-      "goal.split",
-      goal.id,
-      { method: parsed.method, total, targets: rows.length, projectId: goal.projectId },
-      { db: tx },
-    );
+    if (actor.kind === "agent") {
+      await audit(
+        actor.agent,
+        "goal.split",
+        goal.id,
+        { method: parsed.method, total, targets: rows.length, projectId: goal.projectId },
+        { db: tx },
+      );
+    }
     await publish(tx, {
       organisationId: goal.organisationId,
       type: "goal.split",
-      actorAgentId: agent.agentId,
+      actorAgentId: actor.kind === "agent" ? actor.agent.agentId : null,
       payload: {
         goalId: goal.id,
         projectId: goal.projectId,
@@ -412,23 +446,41 @@ export async function splitGoalPool(
   });
 }
 
+/** Executes a pool split on behalf of the calling agent (#616). */
+export async function splitGoalPool(
+  agent: AgentContext,
+  goalId: string,
+  input: SplitGoalPoolInput,
+): Promise<{ goal: GoalWithBudget; allocations: GoalAllocationRecord[] }> {
+  return splitGoalPoolRow({ kind: "agent", agent }, goalId, input);
+}
+
+/** Executes a pool split on behalf of a signed-in person (the web goals UI). */
+export async function splitGoalPoolForPerson(
+  person: { userId: string; organisationId: string },
+  goalId: string,
+  input: SplitGoalPoolInput,
+): Promise<{ goal: GoalWithBudget; allocations: GoalAllocationRecord[] }> {
+  return splitGoalPoolRow({ kind: "person", ...person }, goalId, input);
+}
+
 /**
  * Moves a goal between `active`, `completed`, and `cancelled` (#616). Closed
  * goals stop accepting splits; existing allocations stay.
  *
- * @param agent - The authenticated agent context.
+ * @param actor - The agent key or signed-in person making the write.
  * @param goalId - The goal to update.
  * @param input - A validated status payload (`updateGoalStatusSchema`).
  * @returns The refreshed goal with its budget projection.
  * @throws {IssueApiError} 404 when the goal is missing.
  */
-export async function updateGoalStatus(
-  agent: AgentContext,
+async function updateGoalStatusRow(
+  actor: GoalActor,
   goalId: string,
   input: UpdateGoalStatusInput,
 ): Promise<GoalWithBudget> {
   const { status } = updateGoalStatusSchema.parse(input);
-  const goal = await resolveGoal(agent, goalId);
+  const goal = await resolveGoal(actorOrganisationId(actor), goalId);
 
   return prisma.$transaction(async (tx) => {
     const updated = await tx.goal.update({
@@ -436,13 +488,33 @@ export async function updateGoalStatus(
       data: { status },
       select: goalSelect,
     });
-    await audit(agent, "goal.status_changed", goal.id, { status }, { db: tx });
+    if (actor.kind === "agent") {
+      await audit(actor.agent, "goal.status_changed", goal.id, { status }, { db: tx });
+    }
     await publish(tx, {
       organisationId: goal.organisationId,
       type: "goal.updated",
-      actorAgentId: agent.agentId,
+      actorAgentId: actor.kind === "agent" ? actor.agent.agentId : null,
       payload: { goalId: goal.id, projectId: goal.projectId, status },
     });
     return withBudget(updated);
   });
+}
+
+/** Moves a goal's status on behalf of the calling agent (#616). */
+export async function updateGoalStatus(
+  agent: AgentContext,
+  goalId: string,
+  input: UpdateGoalStatusInput,
+): Promise<GoalWithBudget> {
+  return updateGoalStatusRow({ kind: "agent", agent }, goalId, input);
+}
+
+/** Moves a goal's status on behalf of a signed-in person (the web goals UI). */
+export async function updateGoalStatusForPerson(
+  person: { userId: string; organisationId: string },
+  goalId: string,
+  input: UpdateGoalStatusInput,
+): Promise<GoalWithBudget> {
+  return updateGoalStatusRow({ kind: "person", ...person }, goalId, input);
 }

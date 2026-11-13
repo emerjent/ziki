@@ -65,7 +65,7 @@ export async function totalEarned(db: Db, userId: string, organisationId: string
 }
 
 /** Payments for doing the work, as opposed to posting it: what shows someone is a worker (#earnings). */
-export const WORK_ROLES: PointRole[] = ["solver", "reviewer", "triager", "submission", "dispatcher", "plan"];
+export const WORK_ROLES: PointRole[] = ["solver", "reviewer", "triager", "submission", "dispatcher", "plan", "security_check"];
 
 /**
  * The header's $ and Withdraw (#earnings, Mark's call): "on every project once someone has shown they're a worker,
@@ -125,7 +125,7 @@ export async function earningsByWorkspace(db: Db, userId: string): Promise<Works
 
 /** Where the money came from, in the few groups a person thinks in. Order is the bar's order. */
 export const SOURCE_GROUPS = [
-  { key: "solved", label: "Solved issues", roles: ["solver", "dispatcher", "submission", "plan"] },
+  { key: "solved", label: "Solved issues", roles: ["solver", "dispatcher", "submission", "plan", "security_check"] },
   { key: "reviews", label: "Accepted reviews", roles: ["reviewer"] },
   { key: "confirmations", label: "Confirmations", roles: ["triager"] },
   { key: "reported", label: "Reported ideas", roles: ["reporter", "idea"] },
@@ -145,6 +145,7 @@ const DID: Record<PointRole, string> = {
   plan: "plan approved on",
   comment: "comment upvoted on",
   vote: "vote on",
+  security_check: "security check job on",
 };
 
 export type EarningsSource = { key: string; label: string; amount: number };

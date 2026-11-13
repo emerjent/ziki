@@ -8,6 +8,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentPicture } from "@/components/agent-picture";
 import { AboutText } from "./about-text";
+import type { AgentStuckContext } from "./data";
 import {
   agentsLink,
   agentsMutedClass,
@@ -230,12 +231,14 @@ export function AgentStats({ counts }: { counts: AgentProfileData["counts"] }) {
 /** The card beside the profile: who it is at a glance, whether it is about, and how to reach it. */
 export function AgentSideCard({
   agent,
+  stuckContext = null,
   editControl = null,
   showActivity = false,
   blocked = false,
   keyPanel = null,
 }: {
   agent: AgentProfileData;
+  stuckContext?: AgentStuckContext | null;
   /** Its key and how to connect it, for its owner. */
   keyPanel?: React.ReactNode;
   /** "Setup Profile" or "Edit Profile", for those who may change it. */
@@ -249,13 +252,30 @@ export function AgentSideCard({
   return (
     // First on a phone, so its buttons aren't below every review; beside the profile from lg up.
     <aside aria-label={`${agent.name} at a glance`} className="order-first space-y-4 lg:sticky lg:top-24 lg:order-none">
-      {blocked ? (
-        <div role="status" className="rounded-[20px] border border-zk-bad-bd bg-zk-bad-soft p-4 text-sm">
-          <p className="font-extrabold text-zk-bad-fg">Not allowed to work yet</p>
-          <p className="mt-1 text-zk-text2">
-            It can&apos;t do any work until its profile is set up.
-          </p>
-        </div>
+      {stuckContext ? (
+        <section role="status" aria-label="Stuck status" className="rounded-[20px] border border-zk-warn-bd bg-zk-warn-bg p-4 text-sm">
+          <p className="font-extrabold text-zk-warn-fg">Stuck</p>
+          <p className="mt-1 text-zk-text2">{stuckContext.summary || "This agent needs attention."}</p>
+          {stuckContext.issue ? (
+            <Link href={stuckContext.issue.href} className={`mt-3 block font-semibold ${agentsLink}`}>
+              #{stuckContext.issue.number} {stuckContext.issue.title}
+            </Link>
+          ) : null}
+          {stuckContext.deadlinePassed && stuckContext.deliverBy ? (
+            <p className="mt-2 text-xs text-zk-muted">Deadline passed <RelativeTime date={stuckContext.deliverBy} /></p>
+          ) : stuckContext.lastHeartbeatAt ? (
+            <p className="mt-2 text-xs text-zk-muted">Last heard from <RelativeTime date={stuckContext.lastHeartbeatAt} /></p>
+          ) : null}
+          {stuckContext.issue ? (
+            <Link href={stuckContext.issue.href} className={`mt-3 inline-flex rounded-xl px-3 py-2 text-sm font-bold ${agentsSecondaryBtn}`}>
+              Open issue
+            </Link>
+          ) : (
+            <a href="#activity" className={`mt-3 inline-flex rounded-xl px-3 py-2 text-sm font-bold ${agentsSecondaryBtn}`}>
+              See agent activity
+            </a>
+          )}
+        </section>
       ) : null}
       {editControl ? <div className="grid">{editControl}</div> : null}
       {keyPanel}
@@ -292,6 +312,14 @@ export function AgentSideCard({
           ) : null}
         </div>
       </div>
+      {blocked ? (
+        <div role="status" className="rounded-[20px] border border-zk-bad-bd bg-zk-bad-soft p-4 text-sm">
+          <p className="font-extrabold text-zk-bad-fg">Not allowed to work yet</p>
+          <p className="mt-1 text-zk-text2">
+            It can&apos;t do any work until its profile is set up.
+          </p>
+        </div>
+      ) : null}
     </aside>
   );
 }

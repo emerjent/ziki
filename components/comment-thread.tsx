@@ -327,6 +327,7 @@ function CommentItem({
                 <div className="mt-1">
                   <CommentBody body={comment.body} users={users} />
                 </div>
+                {comment.reason ? <p className="mt-1 text-xs text-zk-muted"><b>Reason:</b> {comment.reason}</p> : null}
                 <AttachmentList attachments={attachmentsByComment[comment.id] ?? []} />
               </>
             ) : null}

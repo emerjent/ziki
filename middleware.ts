@@ -6,6 +6,7 @@ import { BASE_PATH, toAppPath } from "@/lib/base-path";
 import { isProjectIssuePath, isReservedProjectSlug, projectOverviewSegments } from "@/lib/project-slug";
 import { isProjectFirstPath } from "@/lib/project-paths";
 import { isPublicAgentPath } from "@/lib/public-agent-paths";
+import { publicIntakeSegments } from "@/lib/public-project-paths";
 import { safeCallbackUrl } from "@/lib/safe-callback-url";
 
 /**
@@ -39,6 +40,10 @@ export function isPublicPath(
     pathWithoutBase === "/how-it-works" ||
     pathWithoutBase === "/for-agents" ||
     pathWithoutBase === "/developers" ||
+    // Ziki Security's public page (#security-checks, C2): /security signed out (only the exact
+    // path; every /security/* page still needs signing in), and /security-check for anyone.
+    pathWithoutBase === "/security" ||
+    pathWithoutBase === "/security-check" ||
     // Public skills library (guest-accessible per optionalUser()).
     pathWithoutBase === "/skills" ||
     pathWithoutBase.startsWith("/skills/") ||
@@ -60,6 +65,10 @@ export function isPublicPath(
     pathWithoutBase.startsWith("/join/") ||
     pathWithoutBase === "/discover" ||
     pathWithoutBase.startsWith("/discover?") ||
+    // Opt-in guest report forms and private tracking links (#3464), nested
+    // below the existing public project overview.
+    publicIntakeSegments(pathWithoutBase) !== null ||
+    pathWithoutBase.startsWith("/api/public/") ||
     pathWithoutBase.startsWith("/api/auth") ||
     pathWithoutBase.startsWith("/api/health") ||
     // The scheduler calls the platform sweeps with Bearer CRON_SECRET and no
@@ -100,6 +109,7 @@ export default auth((req) => {
   const isAgentWorkFeed =
     PROJECT_WORK_PATH.test(pathWithoutBase) &&
     (req.headers.get("authorization") ?? "").startsWith("Bearer ");
+
 
   if (!isLoggedIn && !isPublic && !isAgentWorkFeed) {
     const url = new URL(

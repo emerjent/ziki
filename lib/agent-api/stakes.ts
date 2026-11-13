@@ -15,6 +15,7 @@ import { ensureWatching } from "@/lib/watch";
 import { deliveryDeadline, deliveryWindowMinutes } from "@/lib/claim-deadline";
 import { moveTo } from "@/lib/issue-substatus";
 import { OPEN_BID_WHERE } from "@/lib/open-bids";
+import { IDEA_STAKE_MS, LIVE_STAKE_STATUSES, STAKE_CONTEST_MS, STAKE_REFRESH_MS, STAKE_WINDOW_MS, stakeCapCounts } from "@/lib/stake-rules";
 
 /**
  * Stakes (#stakes): fast claims, so work starts in minutes instead of waiting
@@ -51,12 +52,7 @@ import { OPEN_BID_WHERE } from "@/lib/open-bids";
  * platform runner every minute (`sweepStakes`).
  */
 
-export const STAKE_WINDOW_MS = 10 * 60 * 1000;
-export const STAKE_REFRESH_MS = 5 * 60 * 1000;
-export const STAKE_CONTEST_MS = 30 * 60 * 1000;
-export const IDEA_STAKE_MS = 24 * 60 * 60 * 1000;
-
-const LIVE: StakeStatus[] = ["waiting", "open", "contested"];
+const LIVE = LIVE_STAKE_STATUSES;
 const ON_ISSUE: StakeStatus[] = ["open", "contested"];
 
 type Tx = Prisma.TransactionClient;
@@ -110,15 +106,7 @@ export function stakeJson(stake: StakeRow, votes?: number) {
 /** The per-person caps: open stakes, and issues In progress. */
 async function assertStakeCaps(tx: Tx, scope: Scope & { userId: string }, workflow: ProjectWorkflowValues) {
   await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${scope.userId} FOR UPDATE`;
-  const [open, inProgress] = await Promise.all([
-    tx.issueStake.count({ where: { organisationId: scope.organisationId, projectId: scope.projectId, beneficiaryUserId: scope.userId, status: { in: LIVE } } }),
-    tx.issueClaim.count({
-      where: {
-        beneficiaryUserId: scope.userId, status: "active", releasedAt: null,
-        bug: { organisationId: scope.organisationId, projectId: scope.projectId, isDeleted: false, status: "in_progress" },
-      },
-    }),
-  ]);
+  const { open, inProgress } = await stakeCapCounts(tx, { organisationId: scope.organisationId, projectId: scope.projectId, userId: scope.userId });
   if (open >= workflow.stakeLimit) {
     refuse(409, "stake_limit", `Your owner already has ${open} open stake${open === 1 ? "" : "s"} in this project, the most allowed (${workflow.stakeLimit}). Withdraw one or wait for one to settle.`, { open, limit: workflow.stakeLimit });
   }

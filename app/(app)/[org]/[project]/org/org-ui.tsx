@@ -9,16 +9,18 @@ export function OrgPageHeader({
   title,
   children,
   actions,
+  heading: Heading = "h2",
 }: {
   title: string;
   /** One or two sentences on what this tab is for. */
   children: React.ReactNode;
   actions?: React.ReactNode;
+  heading?: "h1" | "h2";
 }) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0 space-y-1">
-        <h2 className="text-xl font-bold tracking-tight text-zk-text">{title}</h2>
+        <Heading className="text-xl font-bold tracking-tight text-zk-text">{title}</Heading>
         <p className="max-w-2xl text-sm text-zk-text2">{children}</p>
       </div>
       {actions ? <div className="shrink-0">{actions}</div> : null}

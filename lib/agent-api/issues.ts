@@ -1,4 +1,5 @@
 import { parseTrackFilter, trackFilter } from "@/lib/marketing/track";
+import { GUEST_BLOCKED_ACTIONS, GUEST_BLOCKED_MESSAGE } from "@/lib/agents/guest-access";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import type { AgentLevel, Prisma } from "@prisma/client";
@@ -33,8 +34,11 @@ import { IssueApiError } from "@/lib/agent-api/errors";
 import { latestPullRequestReport, pullRequestStateView } from "@/lib/agent-api/pull-request-report";
 import { agentAttachmentUrl } from "@/lib/agent-api/attachment-read";
 import { entrySummary } from "@/lib/agent-api/entry-fields";
+import { actionReason } from "@/lib/agent-api/action-reason";
 import { findingForBug, findingView, type FindingRow, type FindingViewer } from "@/lib/security-findings";
 import { searchWorkItems } from "@/lib/search-index";
+import { checkPostForSecrets, stringsIn } from "@/lib/security/secret-guard";
+import { findSecretsInFields } from "@/lib/security/secrets";
 
 export { IssueApiError };
 
@@ -52,7 +56,58 @@ function enumFilter<T extends string>(name: string, raw: string | null, allowed:
 /** Files uploaded with POST /api/v1/attachments, linked on save (#645). */
 const attachmentIdsSchema = z.array(idSchema).max(MAX_ATTACHMENTS_PER_ITEM).optional();
 // #730: an agent's comment leads with its point, in at most two sentences, then the full body.
-export const agentCommentSchema = commentSchema.extend({ summary: entrySummary, label: commentLabel.optional(), projectId: idSchema.optional(), attachmentIds: attachmentIdsSchema }).strict();
+export const agentCommentSchema = commentSchema.extend({ summary: entrySummary, label: commentLabel.optional(), reason: actionReason, projectId: idSchema.optional(), attachmentIds: attachmentIdsSchema }).strict();
+
+/**
+ * Push protection for agents (#secret-protection): every string in a write's
+ * JSON body is checked for credentials before the route sees it. A body with
+ * one is answered 422 `secret_detected`, naming the field, line and kind (never
+ * the secret), and nothing is saved. Other bodies, and unreadable JSON (the
+ * route reports that itself), pass on unchanged.
+ */
+async function secretInRequest(request: NextRequest, agent: AgentContext, action: string, target: string | null): Promise<Response | null> {
+  if (!["POST", "PUT", "PATCH"].includes(request.method)) return null;
+  if (!(request.headers.get("content-type") ?? "").toLowerCase().includes("json")) return null;
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    return null;
+  }
+  const fields = stringsIn(body);
+  // The common case reads no database at all: only a body with a secret in it
+  // goes on to have its issue looked up, for the alert's link.
+  if (findSecretsInFields(fields).length === 0) return null;
+  const check = await checkPostForSecrets({
+    organisationId: agent.organisationId,
+    actor: { kind: "agent", agentId: agent.agentId, agentName: agent.name, ownerId: agent.ownerId },
+    source: action,
+    bugId: target ? await issueInOrganisation(target, agent.organisationId) : null,
+    fields,
+  });
+  if (check.ok) return null;
+  return secretDetectedResponse(check);
+}
+
+/** The 422 an agent gets when a write is stopped for a credential in it (#secret-protection). */
+export function secretDetectedResponse(check: { message: string; secrets: unknown[] }): Response {
+  return NextResponse.json(
+    { error: check.message, code: "secret_detected", secrets: check.secrets },
+    { status: 422 },
+  );
+}
+
+/** The issue a route's target names, when it is an issue in this organisation; for linking an alert. */
+async function issueInOrganisation(target: string, organisationId: string): Promise<string | null> {
+  try {
+    const id = await issueIdFor(prisma, target, organisationId);
+    if (!id) return null;
+    const bug = await prisma.bug.findFirst({ where: { id, organisationId }, select: { id: true } });
+    return bug?.id ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Authenticate before parsing input, charge the shared budget, and audit outcomes including denials.
@@ -74,6 +129,10 @@ export async function agentIssueRequest(
   try {
     agent = await requireAgent(request);
     requireLevel(agent, level === "read" ? "working" : level);
+    // On-call guests (12 Nov plan, D2): nothing that outlasts the stay.
+    if (agent.guest && GUEST_BLOCKED_ACTIONS.has(action)) {
+      throw new IssueApiError(403, GUEST_BLOCKED_MESSAGE, { error: "guest_not_allowed", message: GUEST_BLOCKED_MESSAGE });
+    }
     if (agent.pausedAt && action !== "claims.heartbeat" && (action === "work.read" || level !== "read" || options.budget === "write")) {
       throw new IssueApiError(423, "This agent is paused by its owner.");
     }
@@ -89,7 +148,11 @@ export async function agentIssueRequest(
         budgetKind,
       );
       quota = budget;
-      response = budget.allowed ? await run(agent) : agentBudgetExceededResponse(budget.retryAfterSeconds, budget);
+      // #secret-protection: a write carrying a credential is stopped before the route reads it.
+      const stopped = budget.allowed && budgetKind === "write" ? await secretInRequest(request, agent, action, target) : null;
+      response = !budget.allowed
+        ? agentBudgetExceededResponse(budget.retryAfterSeconds, budget)
+        : stopped ?? await run(agent);
     }
   } catch (error) {
     if (error instanceof IssueApiError) response = NextResponse.json(error.body ? { error: error.message, ...error.body } : { error: error.message }, { status: error.status });
@@ -336,7 +399,7 @@ export async function readAgentIssue(scope: Scope, id: string, viewer: FindingVi
     where: { ...scope, ...(ref.kind === "number" ? { number: ref.number } : { id: ref.id }), isDeleted: false },
     select: { ...issueSelect, voteCount: true, comments: {
       where: { deletedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100,
-      select: { id: true, summary: true, body: true, authorId: true, agentId: true, parentId: true, confirmationId: true, bidId: true, deliveryId: true, testVerdictId: true, mergeReviewId: true, createdAt: true, editedAt: true, _count: { select: { votes: true } } },
+      select: { id: true, summary: true, body: true, reason: true, authorId: true, agentId: true, parentId: true, confirmationId: true, bidId: true, deliveryId: true, testVerdictId: true, mergeReviewId: true, createdAt: true, editedAt: true, _count: { select: { votes: true } } },
     }, attachments: {
       // #645: metadata only; agents read the bytes at `url` (#722).
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -401,7 +464,7 @@ export async function countAgentIssues(scope: Scope, params: URLSearchParams) {
 
 /** What a paged comment carries: the embedded read's fields plus who wrote it. */
 const commentSelect = {
-  id: true, summary: true, body: true, authorId: true, agentId: true, parentId: true, confirmationId: true, bidId: true, deliveryId: true, testVerdictId: true, mergeReviewId: true, createdAt: true, editedAt: true,
+  id: true, summary: true, body: true, reason: true, authorId: true, agentId: true, parentId: true, confirmationId: true, bidId: true, deliveryId: true, testVerdictId: true, mergeReviewId: true, createdAt: true, editedAt: true,
   author: { select: { id: true, name: true } },
   agent: { select: { id: true, name: true } },
   _count: { select: { votes: true } },
@@ -496,6 +559,7 @@ export async function commentOnAgentIssue(agent: AgentContext, request: NextRequ
         summary: input.summary,
         label: input.label ?? null,
         body,
+        reason: input.reason ?? null,
         confirmationId: placement.confirmationId,
         bidId: placement.bidId,
         deliveryId: placement.deliveryId,
@@ -512,6 +576,7 @@ export async function commentOnAgentIssue(agent: AgentContext, request: NextRequ
         summary: true,
         label: true,
         body: true,
+        reason: true,
         parentId: true,
         confirmationId: true,
         bidId: true,

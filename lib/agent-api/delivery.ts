@@ -17,10 +17,12 @@ import { PROJECT_REPOSITORIES_SELECT, repoForPullRequest } from "@/lib/github/pr
 import { acceptedFixGate, releaseAcceptedFix } from "@/lib/accepted-fix";
 import { latestPullRequestReport } from "@/lib/agent-api/pull-request-report";
 import { moveTo } from "@/lib/issue-substatus";
+import { actionReason } from "@/lib/agent-api/action-reason";
 import { deliverableText, marketingDeliveryBodySchema } from "@/lib/validations/marketing";
 import { linkAttachments } from "@/lib/attachment-link";
 import { MAX_ATTACHMENTS_PER_ITEM } from "@/lib/attachments";
 import { deliveryReceiptSchema, storedReceipt, type DeliveryReceipt } from "@/lib/delivery-receipt";
+import { endGuestStay } from "@/lib/on-call-guests";
 
 /**
  * Work delivered (#delivered-step): the In progress step's entry. The agent
@@ -61,6 +63,7 @@ export const deliveryBodySchema = z
     summary: entrySummary,
     /** What changed, how it was checked, and anything left open. */
     description: entryDescription,
+    reason: actionReason,
     screenshots: z.array(z.string().trim().min(1).max(2048)).max(20).optional(),
     testResults: z.union([z.string().trim().min(1).max(20_000), z.record(z.string(), z.unknown())]).optional(),
     /** What was verified, what was not, and what the reviewer should test (#delivery-receipt). Both tracks. */
@@ -93,6 +96,7 @@ export type DeliveryEntry = {
   beneficiaryUserId: string;
   summary: string;
   description: string;
+  reason: string | null;
   pullRequestUrl: string | null;
   /** The finished work as Markdown, on marketing work. */
   deliverableText: string | null;
@@ -142,6 +146,7 @@ export async function deliveryEntries(bug: { id: string; pullRequestUrl: string 
       beneficiaryUserId: true,
       summary: true,
       description: true,
+      reason: true,
       pullRequestUrl: true,
       deliverableText: true,
       deliverableUrls: true,
@@ -204,7 +209,7 @@ export async function listDeliveries(scope: { organisationId: string; projectId?
 }
 
 export type DeliverResult =
-  | { status: 201 | 200; delivery: DeliveryEntry; replaced: boolean }
+  | { status: 201 | 200; delivery: DeliveryEntry; replaced: boolean; issueId: string; pullRequestUrl: string | null }
   | { status: 400 | 403 | 404 | 409 | 422; error: string; message: string; field?: string };
 
 /**
@@ -436,6 +441,7 @@ export async function deliverWork(
         beneficiaryUserId: beneficiaryUserId!,
         summary: body.summary,
         description: body.description,
+        reason: body.reason ?? null,
         pullRequestUrl,
         deliverableText: marketing ? body.deliverableText ?? null : null,
         deliverableUrls: marketing ? body.deliverableUrls ?? [] : [],
@@ -552,7 +558,15 @@ export async function deliverWork(
     await createReviewOffers(prisma, { agentId: agent.agentId, organisationId: agent.organisationId }, bug.id, { pullRequestUrl: pullRequestUrl!, headSha }).catch(() => null);
   }
 
+  // On-call guests (12 Nov plan, D2): a guest leaves the workspace after delivering its
+  // first task here. The delivery and its claim stand; only its stay and its other open work here end.
+  if (agent.guest) {
+    await prisma
+      .$transaction((tx) => endGuestStay(tx, { agentId: agent.agentId, organisationId: agent.organisationId, actorUserId: agent.ownerId, reason: "first_delivery", deliveredIssueId: bug.id }))
+      .catch((error) => console.error("[delivery] couldn't end an on-call guest's stay", error));
+  }
+
   const entries = await deliveryEntries({ id: bug.id, pullRequestUrl });
   const entry = entries.find((row) => row.id === delivery.id)!;
-  return { status: replaced ? 200 : 201, delivery: entry, replaced };
+  return { status: replaced ? 200 : 201, delivery: entry, replaced, issueId: bug.id, pullRequestUrl };
 }
