@@ -34,10 +34,13 @@ const skillSubmissionFindMany = vi.hoisted(() => vi.fn());
 const skillSubmissionFindUnique = vi.hoisted(() => vi.fn());
 const skillSubmissionUpdate = vi.hoisted(() => vi.fn());
 const projectFindMany = vi.hoisted(() => vi.fn());
+const redesignFindFirst = vi.hoisted(() => vi.fn());
+const redesignFindMany = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     project: { findFirst, findUnique: projectFindUnique, findMany: projectFindMany },
+    redesignProposal: { findFirst: redesignFindFirst, findMany: redesignFindMany },
     bug: { findUnique: bugFindUnique, findMany: publishedTasks, groupBy: taskCounts, count: bugCount, findFirst: bugFindFirst },
     idea: { count: proposalCount, findMany: proposals, findFirst: ideaFindFirst },
     ideaVerdict: { groupBy: proposalVotes, findMany: myVerdicts },
@@ -96,6 +99,7 @@ import { readRejectedIdeas } from "@/app/(app)/[org]/[project]/marketing/ideas/r
 import { parseTaskView } from "@/components/marketing/tasks/model";
 import { marketingTabHref } from "@/lib/header-nav";
 import { issueProject } from "@/lib/agent-api/issues";
+import { getAgentRedesign, listAgentRedesigns } from "@/lib/redesign-read";
 import { getSkills, CORE_SKILL_TEMPLATES } from "@/app/(app)/skills/skills-data";
 import { projectRef } from "@/lib/project-paths";
 import { canManageProject } from "@/lib/project-permissions";
@@ -134,6 +138,46 @@ describe("issueProject organisation scope (#user-agents)", () => {
     findFirst.mockResolvedValue(null);
     await expect(issueProject(agent, new URLSearchParams("projectId=project_elsewhere"))).rejects.toMatchObject({ status: 404 });
     expect(findFirst.mock.calls[0][0].where).toEqual({ id: "project_elsewhere", organisationId: "organisation_zedu" });
+  });
+});
+
+describe("redesign proposals stay in the agent's organisation (#9)", () => {
+  const openProject = { archivedAt: null, organisation: { archivedAt: null } };
+  const row = {
+    id: "rd-1", organisationId: "organisation_zedu", projectId: "project_web", bugId: null, authorAgentId: "agent1", onBehalfOfUserId: "ada",
+    title: "Calmer dashboard", body: "Muted tiles.", previewUrl: "https://example.com/p", status: "proposed", approverId: null, approvedAt: null,
+    createdAt: new Date("2026-11-01T10:00:00Z"), updatedAt: new Date("2026-11-01T10:00:00Z"),
+    attachments: [{ id: "att1", filename: "tiles.png", contentType: "image/png", size: 120 }],
+    project: { slug: "web", organisation: { slug: "acme" } },
+  };
+
+  beforeEach(() => {
+    findFirst.mockReset();
+    redesignFindFirst.mockReset();
+    redesignFindMany.mockReset();
+  });
+
+  it("is a 404 for another organisation's proposal, or one in an archived project", async () => {
+    redesignFindFirst.mockResolvedValue(null);
+    await expect(getAgentRedesign(agent, "rd-elsewhere")).rejects.toMatchObject({ status: 404 });
+    expect(redesignFindFirst.mock.calls[0][0].where).toEqual({ id: "rd-elsewhere", organisationId: "organisation_zedu", project: openProject });
+  });
+
+  it("lists nothing for another organisation's project or an archived one: a 404 before any proposal is read", async () => {
+    findFirst.mockResolvedValue(null);
+    await expect(listAgentRedesigns(agent, new URLSearchParams("projectId=project_elsewhere"))).rejects.toMatchObject({ status: 404 });
+    expect(findFirst.mock.calls[0][0].where).toEqual({ id: "project_elsewhere", organisationId: "organisation_zedu", ...openProject });
+    expect(redesignFindMany).not.toHaveBeenCalled();
+  });
+
+  it("lists one project's proposals inside the organisation, with each mockup's url and the Design page", async () => {
+    findFirst.mockResolvedValue({ id: "project_web" });
+    redesignFindMany.mockResolvedValue([row]);
+    const page = await listAgentRedesigns(agent, new URLSearchParams("projectId=project_web&status=proposed&mine=1"));
+    expect(redesignFindMany.mock.calls[0][0].where).toEqual({ organisationId: "organisation_zedu", projectId: "project_web", status: "proposed", authorAgentId: "agent1" });
+    expect(page.nextCursor).toBeNull();
+    expect(page.items[0]).toMatchObject({ id: "rd-1", attachments: [{ id: "att1", url: "/api/v1/attachments/att1" }], designUrl: expect.stringMatching(/\/acme\/web\/design\/rd-1$/) });
+    expect(page.items[0]).not.toHaveProperty("project");
   });
 });
 

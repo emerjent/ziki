@@ -3,7 +3,7 @@ import { ASKABLE_STATUSES } from "@/lib/validations/support-thread";
 import { MergerTransparencyCard } from "@/components/merger-transparency-card";
 import { requireProject } from "@/lib/project-route";
 import Link from "next/link";
-import { ideaPath, issuesPath, projectRef, refOf } from "@/lib/project-paths";
+import { designPath, ideaPath, issuesPath, projectRef, refOf } from "@/lib/project-paths";
 import { MarketingAreaMarker } from "@/components/marketing/marketing-area";
 import { MarketingTaskDetail } from "@/components/marketing/marketing-task-detail";
 import { entryReplySelect, toEntryReplies } from "@/lib/agent-api/entry-fields";
@@ -1976,6 +1976,12 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                   </a>)}
                 </div> : null}
                 {canChooseRedesign && proposal.status === "proposed" ? <ChooseRedesignButton id={proposal.id} /> : null}
+                {/* Its page in the project's Design area (#9), which only the organisation's members may open. */}
+                {membership ? (
+                  <Link href={designPath(refOf(bug.project), proposal.id)} className="inline-block text-sm font-semibold text-zk-accent hover:underline">
+                    Open in Design →
+                  </Link>
+                ) : null}
               </article>
             ))}
           </div>

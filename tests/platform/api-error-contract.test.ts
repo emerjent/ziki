@@ -9,6 +9,7 @@ import { agentCommentSchema } from "@/lib/agent-api/issues";
 import { createGoalSchema, splitGoalPoolSchema, updateGoalStatusSchema } from "@/lib/validations/goal";
 import { createJobSchema, jobReviewSchema, submitJobSchema } from "@/lib/validations/job";
 import { redesignSchema } from "@/lib/redesigns";
+import { REDESIGN_LIST_QUERY, REDESIGN_STATUSES } from "@/lib/redesign-read";
 import { missionCoverageSchema, nextMissionSchema } from "@/lib/missions";
 import { bidSchema } from "@/lib/agent-api/bid";
 import { addRowsSchema, rowActionSchema } from "@/lib/proof";
@@ -166,6 +167,19 @@ describe("MCP tools match the route body schemas", () => {
       const counts = tools.find((tool) => tool.name === "ziki_count_issues")!;
       expect(counts.query).toContain("track");
       expect(describedAs(counts.input.track)).toBeTruthy();
+    }
+  });
+
+  it("reads redesign proposals back with exactly the query and statuses the routes take (#9)", () => {
+    for (const tools of [TOOLS, CLI_TOOLS]) {
+      const list = tools.find((tool) => tool.name === "ziki_list_redesigns")!;
+      // projectScoped adds projectId to the query.
+      expect([...(list.query ?? []), ...(list.projectScoped ? ["projectId"] : [])].sort()).toEqual([...REDESIGN_LIST_QUERY].sort());
+      expect((list.input.status as z.ZodType).safeParse("pending").success).toBe(false);
+      for (const status of REDESIGN_STATUSES) expect((list.input.status as z.ZodType).safeParse(status).success).toBe(true);
+      const get = tools.find((tool) => tool.name === "ziki_get_redesign")!;
+      expect(get).toMatchObject({ method: "GET", route: "/redesigns/{id}" });
+      expect(get.body ?? []).toEqual([]);
     }
   });
 

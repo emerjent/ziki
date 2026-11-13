@@ -18,6 +18,7 @@
     "verify:status": "node scripts/verify.mjs status",
     "db:migrate": "prisma migrate dev",
     "db:scenario:open-bids": "tsx --env-file=.env scripts/dev/scenario-open-bids.ts",
+    "db:scenario:design-area": "tsx --env-file=.env scripts/dev/scenario-design-area.ts",
     "db:scenario:bidder-record": "tsx --env-file=.env scripts/dev/scenario-bidder-record.ts",
     "db:scenario:agents-dock": "tsx --env-file=.env scripts/dev/scenario-agents-dock.ts",
     "db:fixtures": "tsx --env-file=.env scripts/dev/fixtures/run.ts",

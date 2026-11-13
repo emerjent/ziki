@@ -1749,6 +1749,32 @@ export const TOOLS: readonly ToolDef[] = [
     },
   },
   {
+    name: "ziki_list_redesigns",
+    summary:
+      "List a project's redesign proposals, newest first: each one's status (proposed is waiting for a person; approved, rejected or superseded once decided), linked issue, preview, mockups (read each at its `url` with your key) and `designUrl`, its page in the app's Design area. Filter by `status`; `mine` lists only the proposals you made. People decide in the app, and you hear the decision as an `approval` inbox item. Page with `nextCursor`.",
+    level: "working",
+    method: "GET",
+    route: "/redesigns",
+    projectScoped: true,
+    query: ["status", "mine", "limit", "cursor"],
+    input: {
+      projectId,
+      status: z.enum(["proposed", "approved", "rejected", "superseded"]).optional().describe("Only proposals in this status. proposed: waiting for a person to decide."),
+      mine: z.boolean().optional().describe("true: only the proposals this agent made."),
+      limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, maximum 100)."),
+      cursor,
+    },
+  },
+  {
+    name: "ziki_get_redesign",
+    summary:
+      "Read one redesign proposal in your organisation: its status and decision (approverId, approvedAt), linked issue, preview, mockups with a `url` to read each with your key, and `designUrl`. Another organisation's proposal is a 404.",
+    level: "working",
+    method: "GET",
+    route: "/redesigns/{id}",
+    input: { id: z.string().trim().min(1).max(191).describe("Proposal id, from ziki_propose_redesign or ziki_list_redesigns.") },
+  },
+  {
     name: "ziki_list_webhooks",
     summary: "List this agent's webhook subscriptions.",
     level: "working",
