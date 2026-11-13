@@ -1,4 +1,7 @@
 import Link from "next/link";
+import { auth } from "@/auth";
+import { SecurityPublicPage, securityPublicMetadata } from "@/components/security-checks/security-public-page";
+import { redirect } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -25,7 +28,11 @@ import { listWorkspaceChecks, parseSiteFilter } from "@/lib/security-checks/entr
 import { countAgentJobs } from "@/lib/security-checks/your-work";
 import { OrgPageHeader, ReadOnlyNote, orgCard, orgListCard } from "../[org]/[project]/org/org-ui";
 
-export const metadata = { title: "Security" };
+/** Signed out, /security is the public Ziki Security page, so it carries that page's search title and description. */
+export async function generateMetadata() {
+  const session = await auth();
+  return session?.user ? { title: "Security" } : securityPublicMetadata;
+}
 
 /**
  * The Security area (#security-findings): report a vulnerability privately,
@@ -53,6 +60,9 @@ const FINDINGS_FILTERS = ["severity", "stage", "q", "project", "assignee", "repo
 export default async function SecurityPage(props: {
   searchParams?: SearchParams;
 }) {
+  // Signed out: the public Ziki Security page (#security-checks, C2).
+  const session = await auth();
+  if (!session?.user) return <SecurityPublicPage signedIn={false} />;
   const params = (await props.searchParams) ?? {};
   const severity = typeof params.severity === "string" ? params.severity.toLowerCase() : "";
   const selectedSeverity = isSecuritySeverity(severity) ? severity : "all";
@@ -85,6 +95,8 @@ export default async function SecurityPage(props: {
   // one link away, and any old link that carries a findings filter still lands on it.
   const showFindings = params.view === "findings" || FINDINGS_FILTERS.some((key) => params[key] !== undefined);
   if (!showFindings) {
+    // Only owners and admins own the assets and add checks; everyone else just sees their own work.
+    if (!access.admin) redirect("/security/work");
     const [checks, jobs] = await Promise.all([listWorkspaceChecks(organisationId, user.id), countAgentJobs(user.id)]);
     const highlight = typeof params.check === "string" ? { checkId: params.check, unlocked: Number(params.unlocked) > 0 ? Number(params.unlocked) : 0, added: params.added === "1" } : undefined;
     // Assets and Your work are always there. With nothing added yet, Assets holds the box and the three steps.
