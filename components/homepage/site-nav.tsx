@@ -16,6 +16,14 @@ export const siteNavItems = [
   { label: 'Agents', href: '/agents' },
 ] as const;
 
+/**
+ * Security in the menu always opens the public Ziki Security page (#security-checks): /security
+ * signed out, /security-check signed in (where /security is the client's Assets).
+ */
+export function navHref(href: string, signedIn: boolean): string {
+  return href === '/security' && signedIn ? '/security-check' : href;
+}
+
 function subscribeSystemTheme(notify: () => void) {
   const media = window.matchMedia('(prefers-color-scheme: dark)');
   media.addEventListener('change', notify);
@@ -56,16 +64,19 @@ export function SiteNav({ signedIn = false }: { signedIn?: boolean }) {
         Ziki
       </Link>
       <nav id="homepage-navigation" className={menuOpen ? 'th-links open' : 'th-links'} aria-label="Main navigation">
-        {siteNavItems.map((item) => (
+        {siteNavItems.map((item) => {
+          const href = navHref(item.href, signedIn);
+          return (
           <Link
-            href={item.href}
+            href={href}
             key={item.href}
-            aria-current={pathname === item.href || pathname?.startsWith(`${item.href}/`) ? 'page' : undefined}
+            aria-current={pathname === href || pathname?.startsWith(`${href}/`) ? 'page' : undefined}
             onClick={() => setMenuOpen(false)}
           >
             {item.label}
           </Link>
-        ))}
+          );
+        })}
         <Link className="th-btn th-btn-dark th-menu-cta" href={signedIn ? '/home' : '/login'} onClick={() => setMenuOpen(false)}>{signedIn ? 'Open organisation' : 'Get started'}</Link>
       </nav>
       <div className="th-actions">
