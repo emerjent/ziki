@@ -44,7 +44,7 @@ const db = vi.hoisted(() => ({
   project: { findFirst: vi.fn() },
   agentMistake: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), findMany: vi.fn() },
   supportThread: { findMany: vi.fn(async () => []), updateMany: vi.fn() },
-  membership: { findFirst: vi.fn(async () => ({ id: "mem1" })), findUnique: vi.fn(async () => ({ id: "mem1" })) },
+  membership: { findFirst: vi.fn(async (): Promise<{ id: string; role?: string } | null> => ({ id: "mem1", role: "admin" })), findUnique: vi.fn(async () => ({ id: "mem1" })) },
   notification: { createMany: vi.fn() },
   $queryRaw: vi.fn(),
   $transaction: vi.fn(),
@@ -644,7 +644,7 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
 
   it("rejects approval when the authenticated user is not authorised in the organisation", async () => {
     marketingReady();
-    db.membership.findFirst.mockResolvedValueOnce({ id: "mem_regular", role: "member" } as any);
+    db.membership.findFirst.mockResolvedValueOnce({ id: "mem_regular", role: "member" });
 
     // Agent has working level (not manager) and user is regular member (not admin/owner)
     const result = await acceptFix(
@@ -677,7 +677,7 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
 
   it("rejects publication confirmation if the manager does not belong to the organisation", async () => {
     marketingReady();
-    db.membership.findFirst.mockResolvedValueOnce(null as any);
+    db.membership.findFirst.mockResolvedValueOnce(null);
 
     const result = await acceptFix(
       merger("m1", "external_attacker_user", "manager"),

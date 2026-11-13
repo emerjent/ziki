@@ -75,7 +75,6 @@ function statusLabel(status: LibraryItem["deliveryStatus"]): string {
 
 export function Library({
   slug,
-  projectName,
   initial,
 }: {
   slug: ProjectRef;
