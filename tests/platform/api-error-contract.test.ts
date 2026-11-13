@@ -136,7 +136,16 @@ const AGENT_LAYER_FIELDS = new Set(["attachmentIds", "acknowledgeSimilar"]);
 const NOT_OFFERED_TO_AGENTS: Record<string, readonly string[]> = {
   ziki_create_idea: ["typeId"],
   // `action` is the older name for `verdict`, kept for old clients only.
-  ziki_merge_fix: ["action"],
+  // The others are human manager-level publication verification and override fields.
+  ziki_merge_fix: [
+    "action",
+    "onBehalfOfUserId",
+    "confirmPublication",
+    "manualOverrideReason",
+    "confirmedUrls",
+    "manualOverrides",
+  ],
+  ziki_deliver: ["publishedUrls"],
   ziki_reject_idea: ["rejectReason"],
 };
 
