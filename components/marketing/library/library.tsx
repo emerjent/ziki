@@ -567,7 +567,6 @@ export function Library({
     </div>
   );
 }
-}
 
 function DeliverablePreview({
   file,
