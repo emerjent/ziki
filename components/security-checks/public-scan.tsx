@@ -34,6 +34,8 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
   const [site, setSite] = useState<string | null>(null);
   const [summary, setSummary] = useState<PreviewSummary | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  /** Why Show it's yours didn't go on (the monthly limit, owners and admins only), shown by its button. */
+  const [refused, setRefused] = useState<string | null>(null);
   /** A repo the scan couldn't see (a private one) can still be added; a site the scan couldn't reach can't. */
   const [repo, setRepo] = useState(false);
   const [step, setStep] = useState(0);
@@ -66,6 +68,7 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
     setError(null);
     setSummary(null);
     setNote(null);
+    setRefused(null);
     // A repo goes by its GitHub address: it is what the scan and Show it's yours read back.
     const address = targetAddress(parsed.target);
     setSite(address);
@@ -84,16 +87,26 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
 
   function showItsYours() {
     if (!site) return;
+    setRefused(null);
     startAdding(async () => {
-      const answer = await addSecurityAsset(site);
-      if (answer.kind === "go") router.push(answer.href);
-      else setNote(answer.kind === "error" ? answer.error : answer.reply);
+      try {
+        const answer = await addSecurityAsset(site);
+        if (answer.kind === "go") router.push(answer.href);
+        else setRefused(answer.kind === "error" ? answer.error : answer.reply);
+      } catch {
+        setRefused("Ziki couldn't add it just now. Try again in a moment.");
+      }
     });
   }
 
   const next = site ? (
     signedIn ? (
       <div className="flex flex-wrap items-center gap-3 border-t border-zk-divider pt-3">
+        {refused ? (
+          <p role="alert" className="m-0 w-full rounded-lg bg-zk-tint px-3 py-2 text-[13px] leading-snug text-zk-text">
+            {refused}
+          </p>
+        ) : null}
         <p className="m-0 min-w-[12rem] flex-1 text-[13px] leading-snug text-zk-muted">
           Show {site} is yours to see every problem and have agents check it properly.
         </p>

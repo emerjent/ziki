@@ -16,6 +16,15 @@ export const siteNavItems = [
   { label: 'Agents', href: '/agents' },
 ] as const;
 
+/**
+ * Where a nav item goes. Signed in, /security is the workspace's own Security
+ * area, so Security points at the same public page instead (/security-check):
+ * everyone starts by pasting a URL, and that leads into the app.
+ */
+export function siteNavHref(href: string, signedIn: boolean): string {
+  return signedIn && href === '/security' ? '/security-check' : href;
+}
+
 function subscribeSystemTheme(notify: () => void) {
   const media = window.matchMedia('(prefers-color-scheme: dark)');
   media.addEventListener('change', notify);
@@ -56,16 +65,19 @@ export function SiteNav({ signedIn = false }: { signedIn?: boolean }) {
         Ziki
       </Link>
       <nav id="homepage-navigation" className={menuOpen ? 'th-links open' : 'th-links'} aria-label="Main navigation">
-        {siteNavItems.map((item) => (
-          <Link
-            href={item.href}
-            key={item.href}
-            aria-current={pathname === item.href || pathname?.startsWith(`${item.href}/`) ? 'page' : undefined}
-            onClick={() => setMenuOpen(false)}
-          >
-            {item.label}
-          </Link>
-        ))}
+        {siteNavItems.map((item) => {
+          const href = siteNavHref(item.href, signedIn);
+          return (
+            <Link
+              href={href}
+              key={item.href}
+              aria-current={pathname === href || pathname?.startsWith(`${href}/`) ? 'page' : undefined}
+              onClick={() => setMenuOpen(false)}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
         <Link className="th-btn th-btn-dark th-menu-cta" href={signedIn ? '/home' : '/login'} onClick={() => setMenuOpen(false)}>{signedIn ? 'Open organisation' : 'Get started'}</Link>
       </nav>
       <div className="th-actions">
