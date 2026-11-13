@@ -72,7 +72,7 @@ function sectionOf(pathname: string, ref: ProjectRef): Crumb[] {
   }
   // The Design area (#9): its list, and one proposal under it.
   if (first === "design" && second) return [{ label: "Design", href: designPath(ref) }, { label: "Proposal" }];
-  const pages: Record<string, string> = { notes: "Notes", design: "Design", org: "Organisation", workstream: "Workstream", report: "Report an issue" };
+  const pages: Record<string, string> = { notes: "Notes", design: "Design", org: "Organisation", workstream: "Workstream", report: "Report an issue", import: "Import delivered work" };
   return pages[first] ? named(pages[first]) : [];
 }
 
@@ -131,6 +131,7 @@ export function ProjectBreadcrumb({ project }: { project: BreadcrumbProject }) {
           </>
         )}
       </ol>
+      {ref ? <Link href={`${projectPath(ref)}/import`} className={`${crumb} ml-auto shrink-0 text-zk-accent`}>Import work</Link> : null}
     </nav>
   );
 }

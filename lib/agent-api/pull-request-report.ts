@@ -265,6 +265,7 @@ export async function reportPullRequestStatus(
       beneficiaryUserId: true,
       reporterId: true,
       assigneeId: true,
+      outsideWork: { select: { agentId: true } },
       createdByAgent: { select: { ownerUserId: true } },
       claims: { select: { status: true, releasedAt: true, beneficiaryUserId: true, agentId: true, dispatcherUserId: true, agent: { select: { ownerUserId: true } } } },
     },
