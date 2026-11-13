@@ -68,8 +68,9 @@ function acceptFix(
   agent: Parameters<typeof acceptFixRaw>[0],
   bugId: string,
   body: Record<string, unknown> = {},
+  authContext?: Parameters<typeof acceptFixRaw>[3],
 ) {
-  return acceptFixRaw(agent, bugId, { ...REVIEW, ...body });
+  return acceptFixRaw(agent, bugId, { ...REVIEW, ...body }, authContext);
 }
 
 function bugRow(overrides: Record<string, unknown> = {}) {
@@ -555,11 +556,16 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
       deliveryStatus: "publication_pending",
     });
 
-    await acceptFix(merger("m1", "agent_owner_id", "manager"), "bug1", {
-      onBehalfOfUserId: "authenticated_human_manager",
-      confirmPublication: true,
-      manualOverrideReason: "Confirmed live on partner site by marketing lead",
-    });
+    await acceptFix(
+      merger("m1", "agent_owner_id", "manager"),
+      "bug1",
+      {
+        onBehalfOfUserId: "authenticated_human_manager",
+        confirmPublication: true,
+        manualOverrideReason: "Confirmed live on partner site by marketing lead",
+      },
+      { actingUserId: "authenticated_human_manager" },
+    );
 
     expect(db.delivery.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -578,6 +584,78 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
         }),
       }),
     );
+
+    expect(db.bugActivity.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          actorId: "authenticated_human_manager",
+        }),
+      }),
+    );
+  });
+
+  it("rejects spoofed user IDs where onBehalfOfUserId does not match the authenticated actor", async () => {
+    marketingReady();
+
+    const result = await acceptFix(
+      merger("m1", "real_authenticated_manager", "manager"),
+      "bug1",
+      {
+        onBehalfOfUserId: "victim_manager_user",
+        confirmPublication: true,
+      },
+      { actingUserId: "real_authenticated_manager" },
+    );
+
+    expect(result).toMatchObject({
+      status: 403,
+      error: "not_independent",
+      message: "Spoofed user ID: onBehalfOfUserId does not match the authenticated user.",
+    });
+    expect(db.delivery.update).not.toHaveBeenCalled();
+    expect(db.bug.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects approval when the authenticated actor identity cannot be established", async () => {
+    marketingReady();
+
+    const agentWithoutOwner = {
+      ...merger("m1", "", "manager"),
+      ownerId: "",
+    };
+
+    const result = await acceptFix(
+      agentWithoutOwner,
+      "bug1",
+      { confirmPublication: true },
+      { actingUserId: null },
+    );
+
+    expect(result).toMatchObject({
+      status: 403,
+      error: "insufficient_level",
+      message: "Authenticated manager identity could not be established.",
+    });
+    expect(db.delivery.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects approval when the authenticated user is not authorised in the organisation", async () => {
+    marketingReady();
+    db.membership.findFirst.mockResolvedValueOnce({ id: "mem_regular", role: "member" } as any);
+
+    // Agent has working level (not manager) and user is regular member (not admin/owner)
+    const result = await acceptFix(
+      merger("w1", "regular_member_user", "working"),
+      "bug1",
+      { confirmPublication: true },
+      { actingUserId: "regular_member_user" },
+    );
+
+    expect(result).toMatchObject({
+      status: 403,
+      error: "insufficient_level",
+    });
+    expect(db.delivery.update).not.toHaveBeenCalled();
   });
 
   it("rejects publication confirmation if the agent holding the claim attempts to accept its own work", async () => {
@@ -598,14 +676,19 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
     marketingReady();
     db.membership.findFirst.mockResolvedValueOnce(null as any);
 
-    const result = await acceptFix(merger("m1", "agent_owner_id", "manager"), "bug1", {
-      onBehalfOfUserId: "external_attacker_user",
-      confirmPublication: true,
-    });
+    const result = await acceptFix(
+      merger("m1", "external_attacker_user", "manager"),
+      "bug1",
+      {
+        confirmPublication: true,
+      },
+      { actingUserId: "external_attacker_user" },
+    );
 
     expect(result).toMatchObject({
       status: 403,
       error: "not_independent",
+      message: "The authenticated manager does not belong to this organisation.",
     });
     expect(db.delivery.update).not.toHaveBeenCalled();
   });

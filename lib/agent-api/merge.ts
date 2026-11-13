@@ -288,6 +288,11 @@ async function saveMergeReview(
   return { review: saved, replaced: Boolean(existing) };
 }
 
+export type MergeAuthContext = {
+  /** The conclusively authenticated acting user ID from session/token verification */
+  actingUserId?: string | null;
+};
+
 /**
  * `POST /issues/{id}/merge`: a merge review, accept or reject. The body must
  * carry a summary and a description (400 otherwise). In a manager-governed
@@ -301,16 +306,18 @@ export async function acceptFix(
   agent: AgentContext,
   issueRef: string,
   rawBody: unknown = {},
+  authContext?: MergeAuthContext,
 ): Promise<AcceptFixResult> {
   const parsed = parseMergeReview(rawBody);
   if (!parsed.ok) return parsed.error;
-  return reviewFix(agent, issueRef, parsed.review);
+  return reviewFix(agent, issueRef, parsed.review, authContext);
 }
 
 async function reviewFix(
   agent: AgentContext,
   issueRef: string,
   review: MergeReviewInput,
+  authContext?: MergeAuthContext,
 ): Promise<AcceptFixResult> {
   // #457: the path may be the readable number (`123`, `ZE-123`) or the id.
   const bugId = await issueIdFor(prisma, issueRef, agent.organisationId);
@@ -338,16 +345,54 @@ async function reviewFix(
     return { status: 403, error: "insufficient_level", message: "Only manager or merger agents can accept a fix." };
   }
 
-  const managerUserId = review.onBehalfOfUserId ?? agent.ownerId;
-  if (review.onBehalfOfUserId && review.onBehalfOfUserId !== agent.ownerId) {
-    const membership = await prisma.membership.findFirst({
-      where: { organisationId: agent.organisationId, userId: managerUserId, organisation: { archivedAt: null } },
-      select: { id: true },
-    });
-    if (!membership) {
-      return { status: 403, error: "not_independent", message: "The specified manager does not belong to this organisation." };
-    }
+  // Derive the acting user's identity from authenticated context or trusted key owner.
+  // Do not trust an arbitrary user ID supplied in the request body as proof of identity.
+  const authenticatedUserId = authContext?.actingUserId !== undefined
+    ? authContext.actingUserId
+    : (agent.ownerId || null);
+
+  if (!authenticatedUserId) {
+    return {
+      status: 403,
+      error: "insufficient_level",
+      message: "Authenticated manager identity could not be established.",
+    };
   }
+
+  // Reject spoofed user IDs supplied in the request body
+  if (review.onBehalfOfUserId && review.onBehalfOfUserId !== authenticatedUserId) {
+    return {
+      status: 403,
+      error: "not_independent",
+      message: "Spoofed user ID: onBehalfOfUserId does not match the authenticated user.",
+    };
+  }
+
+  const membership = await prisma.membership.findFirst({
+    where: { organisationId: agent.organisationId, userId: authenticatedUserId, organisation: { archivedAt: null } },
+    select: { id: true, role: true },
+  });
+  if (!membership) {
+    return {
+      status: 403,
+      error: "not_independent",
+      message: "The authenticated manager does not belong to this organisation.",
+    };
+  }
+
+  const isAuthorizedManager =
+    membership.role === "admin" ||
+    membership.role === "owner" ||
+    hasLevel(agent.level, "manager");
+  if (!isAuthorizedManager) {
+    return {
+      status: 403,
+      error: "insufficient_level",
+      message: "The authenticated user is not authorised to approve deliveries in this organisation.",
+    };
+  }
+
+  const managerUserId = authenticatedUserId;
 
   // #493: the merger is an independent reviewer too. The same rule that keeps
   // a claim holder's side out of the verdicts keeps it out of the review —
@@ -373,7 +418,7 @@ async function reviewFix(
     };
   }
 
-  if (review.verdict === "reject") return rejectFix(agent, bug, review, voting);
+  if (review.verdict === "reject") return rejectFix(agent, bug, review, voting, managerUserId);
 
   if (bug.status === "resolved") {
     return {
@@ -545,7 +590,7 @@ async function reviewFix(
     await tx.bugActivity.create({
       data: {
         bugId: bug.id,
-        actorId: agent.ownerId,
+        actorId: managerUserId,
         type: "status_changed",
         summary: decision ? "Fix accepted by agents' merge reviews and marked ready to merge" : "Fix accepted by a manager agent and marked ready to merge",
         metadata: { field: "status", readyToMerge: true, headSha, mergeReviewId: saved.review.id, pullRequestReportId: report?.id ?? null, ...(decision ?? {}) },
@@ -1138,7 +1183,13 @@ async function recordReviewVote(
  * threshold-only project (`voting`) the reject is a vote: the issue goes back
  * only once the weighted rejects reach the threshold.
  */
-async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeReviewInput, voting: Voting | null): Promise<AcceptFixResult> {
+async function rejectFix(
+  agent: AgentContext,
+  bug: LoadedBug,
+  review: MergeReviewInput,
+  voting: Voting | null,
+  managerUserId: string = agent.ownerId,
+): Promise<AcceptFixResult> {
   // The mistake registry is a manager's (lib/agent-api/mistakes.ts), in either governance mode.
   if (review.mistake && !hasLevel(agent.level, "manager")) {
     return { status: 403, error: "insufficient_level", message: "Only manager or merger agents record mistakes. Send the reject without mistake." };
@@ -1184,7 +1235,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
         };
       }
 
-      const saved = await saveMergeReview(tx, agent, current, review, pullRequestUrl, current.pullRequestHeadSha ?? null);
+      const saved = await saveMergeReview(tx, agent, current, review, pullRequestUrl, current.pullRequestHeadSha ?? null, managerUserId);
       if (review.mistake) {
         await recordMistake(agent, current.projectId, { ...review.mistake, bugId: current.id }, tx);
       }
@@ -1217,7 +1268,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
       await tx.bugActivity.create({
         data: {
           bugId: current.id,
-          actorId: agent.ownerId,
+          actorId: managerUserId,
           type: "status_changed",
           summary: sendBack.keepsClaim
             ? `Work rejected by manager: ${review.summary} (revision round ${sendBack.revisionCount} of ${workflow.revisionLimit})`
@@ -1269,7 +1320,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
       return { status: 200, accepted: false, review: saved.review, replaced: saved.replaced, rejected: true };
     }
 
-    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, bug.pullRequestHeadSha ?? null);
+    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, bug.pullRequestHeadSha ?? null, managerUserId);
     if (review.mistake) {
       await recordMistake(agent, bug.projectId, { ...review.mistake, bugId: bug.id }, tx);
     }
@@ -1286,7 +1337,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
     await tx.bugActivity.create({
       data: {
         bugId: bug.id,
-        actorId: agent.ownerId,
+        actorId: managerUserId,
         type: "status_changed",
         summary: `Fix rejected for merging: ${review.summary}`,
         metadata: { field: "status", from: bug.substatus, to: "in_progress", rejected: true, mergeReviewId: saved.review.id, ...(decision ?? {}) },
