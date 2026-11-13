@@ -11,6 +11,7 @@ const db = vi.hoisted(() => ({
   issueType: { findUnique: vi.fn() },
   bug: { findMany: vi.fn(), count: vi.fn(), groupBy: vi.fn(), findFirst: vi.fn() },
   idea: { create: vi.fn(), findMany: vi.fn(), count: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), groupBy: vi.fn() },
+  attachment: { create: vi.fn() },
   user: { upsert: vi.fn() },
   featurePlan: { upsert: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
   featurePlanItem: { findMany: vi.fn(), create: vi.fn() },
@@ -347,6 +348,73 @@ describe("signed-out public idea intake (#3464)", () => {
 
     expect((await submitPublicIdea(proxied, context)).status).toBe(201);
     expect(db.idea.create).toHaveBeenCalled();
+  });
+
+  it("drafts a usable title and summary from a one-box portal submission", async () => {
+    const result = await createPublicIdea(ref, {
+      prompt: "Login button stops responding after clicking Google sign-in.\nTested in Firefox on macOS.",
+      acknowledgeSimilar: true,
+      trackingToken: "b".repeat(32),
+    }, publicHeaders, {
+      db: db as never,
+      consume: rateLimit.consume,
+      emit,
+    });
+
+    expect(result).toMatchObject({ status: 201, ideaId: "public-idea", ideaNumber: 77 });
+    const created = db.idea.create.mock.calls[0][0].data;
+    expect(created.title).toBe("Login button stops responding after clicking Google sign-in.");
+    expect(created.summary).toContain("Login button stops responding");
+    expect(created.description).toContain("Tested in Firefox on macOS.");
+  });
+
+  it("rejects non-image screenshots and stores valid PNG screenshots privately on the idea", async () => {
+    const context = { params: Promise.resolve({ org: "zedu", project: "web" }) };
+    const badForm = new FormData();
+    badForm.set("prompt", "The export dialog freezes when downloading a report.");
+    badForm.set("acknowledgeSimilar", "true");
+    badForm.set("trackingToken", "c".repeat(32));
+    badForm.set("screenshot", new File(["%PDF-1.4\nfake"], "notes.pdf", { type: "application/pdf" }));
+
+    const rejected = await submitPublicIdea(new NextRequest("https://ziki.dev/api/public/projects/zedu/web/ideas", {
+      method: "POST",
+      headers: { origin: "https://ziki.dev", host: "ziki.dev" },
+      body: badForm,
+    }), context);
+    expect(rejected.status).toBe(400);
+    expect(db.idea.create).not.toHaveBeenCalled();
+    expect(db.attachment.create).not.toHaveBeenCalled();
+
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    const goodForm = new FormData();
+    goodForm.set("prompt", "The export dialog freezes when downloading a report.");
+    goodForm.set("acknowledgeSimilar", "true");
+    goodForm.set("trackingToken", "d".repeat(32));
+    goodForm.set("screenshot", new File([pngBytes], "freeze.png", { type: "image/png" }));
+
+    const accepted = await submitPublicIdea(new NextRequest("https://ziki.dev/api/public/projects/zedu/web/ideas", {
+      method: "POST",
+      headers: { origin: "https://ziki.dev", host: "ziki.dev" },
+      body: goodForm,
+    }), context);
+    expect(accepted.status).toBe(201);
+    expect(db.attachment.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        uploaderId: "public-reporter",
+        ideaId: "public-idea",
+        filename: "freeze.png",
+        contentType: "image/png",
+        size: pngBytes.byteLength,
+      }),
+    });
+  });
+
+  it("returns 404 on the contributor portal page when guest intake is off", async () => {
+    db.project.findFirst.mockResolvedValue(null);
+    const { default: ContributorPortalPage } = await import("@/app/[org]/[project]/contribute/page");
+    await expect(
+      ContributorPortalPage({ params: Promise.resolve({ org: "zedu", project: "web" }) }),
+    ).rejects.toThrow(/NEXT_HTTP_ERROR_FALLBACK;404|NEXT_NOT_FOUND/);
   });
 });
 

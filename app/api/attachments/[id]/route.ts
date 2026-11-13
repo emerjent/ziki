@@ -26,7 +26,7 @@ export async function GET(
       size: true,
       data: true,
       bug: { select: { isDeleted: true, organisationId: true, projectId: true, project: { select: { visibility: true } } } },
-      idea: { select: { isDeleted: true, organisationId: true, projectId: true, project: { select: { visibility: true } } } },
+      idea: { select: { isDeleted: true, source: true, organisationId: true, projectId: true, project: { select: { visibility: true } } } },
       comment: { select: { bug: { select: { organisationId: true, isDeleted: true, projectId: true, project: { select: { visibility: true } } } } } },
       redesignProposal: { select: { organisationId: true } },
       securityFinding: { select: { organisationId: true, reporterId: true, disclosedAt: true } },
@@ -69,7 +69,9 @@ export async function GET(
           })
         : false,
     );
-    const isPublicProject = bug.project?.visibility === "public";
+    const isPublicProject =
+      bug.project?.visibility === "public" &&
+      !(attachment.idea && !attachment.bug && attachment.idea.source === "public");
     if (!isOrgMember && !isProjectMember && !isPublicProject && user.role !== "super_admin") {
       return notFound();
     }

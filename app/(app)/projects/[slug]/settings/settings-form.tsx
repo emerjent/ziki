@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useState, useSyncExternalStore } from "react";
 import { updateProjectAction } from "@/app/(app)/projects/actions";
 import type { ProjectActionResult } from "@/app/(app)/projects/actions";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ProjectRewardRulesSection } from "@/components/project-reward-rules-section";
 import type { ProjectRewardConfig } from "@/lib/points/project-rewards";
+import { publicContributePath } from "@/lib/public-project-paths";
 
 type Project = {
   slug: string;
@@ -21,19 +22,35 @@ type Project = {
   acceptsGuestIdeas?: boolean;
   contributorGuidelines?: string | null;
   rewardConfig?: unknown;
+  organisation?: { slug: string } | null;
 };
 
 export function ProjectSettingsForm({
   project,
   defaults = null,
+  orgSlug,
 }: {
   project: Project;
   defaults?: ProjectRewardConfig | null;
+  orgSlug?: string;
 }) {
   const [result, action, pending] = useActionState<ProjectActionResult | undefined, FormData>(updateProjectAction, undefined);
   const [visibility, setVisibility] = useState<"public" | "private">(project.visibility === "public" ? "public" : "private");
   const [isOpenForContributors, setIsOpenForContributors] = useState(Boolean(project.isOpenForContributors));
   const [acceptsGuestIdeas, setAcceptsGuestIdeas] = useState(Boolean(project.acceptsGuestIdeas));
+  const [copiedPortal, setCopiedPortal] = useState<"link" | "embed" | null>(null);
+  const origin = useSyncExternalStore(
+    () => () => {},
+    () => window.location.origin,
+    () => "",
+  );
+
+  const resolvedOrgSlug = orgSlug ?? project.organisation?.slug ?? "";
+  const portalPath = resolvedOrgSlug ? publicContributePath({ orgSlug: resolvedOrgSlug, projectSlug: project.slug }) : "";
+  const portalUrl = portalPath ? `${origin}${portalPath}` : "";
+  const embedSnippet = portalUrl
+    ? `<a href="${portalUrl}" target="_blank" rel="noopener noreferrer">Report an issue</a>`
+    : "";
 
   return (
     <form action={action} className="space-y-4">
@@ -120,8 +137,56 @@ export function ProjectSettingsForm({
                 <span>Accept public issue reports</span>
               </label>
               <p className="mt-1 pl-6 text-xs text-zk-muted">
-                Signed-out visitors may send an idea to the private triage queue and track it with an unlisted link. It is not published on the project overview. Guests cannot vote, bid, claim, review, or upload files.
+                Signed-out visitors may send an idea (and an optional screenshot) to the private triage queue and track it with an unlisted link. It is not published on the project overview.
               </p>
+              {acceptsGuestIdeas && portalUrl ? (
+                <div className="mt-3 ml-6 space-y-2.5 rounded-xl border border-zk-border bg-zk-subtle/40 p-3">
+                  <div>
+                    <label htmlFor="contributor-portal-link" className="block text-xs font-semibold text-zk-text">
+                      Contributor portal link
+                    </label>
+                    <div className="mt-1 flex gap-2">
+                      <Input id="contributor-portal-link" readOnly value={portalUrl} className="font-mono text-xs" />
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(portalUrl);
+                            setCopiedPortal("link");
+                          } catch {
+                            setCopiedPortal(null);
+                          }
+                        }}
+                      >
+                        {copiedPortal === "link" ? "Copied" : "Copy"}
+                      </Button>
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="contributor-portal-embed" className="block text-xs font-semibold text-zk-text">
+                      README / HTML snippet
+                    </label>
+                    <div className="mt-1 flex gap-2">
+                      <Input id="contributor-portal-embed" readOnly value={embedSnippet} className="font-mono text-xs" />
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(embedSnippet);
+                            setCopiedPortal("embed");
+                          } catch {
+                            setCopiedPortal(null);
+                          }
+                        }}
+                      >
+                        {copiedPortal === "embed" ? "Copied" : "Copy"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div>

@@ -218,7 +218,7 @@ export default async function ProjectSettingsPage({
                 <h2 className="m-0 text-lg font-bold text-zk-text">Details &amp; rewards</h2>
                 <span className="text-[13px] text-zk-muted">What the project is, where it lives, and what its work pays.</span>
               </div>
-              <ProjectSettingsForm project={project} defaults={platformDefaults} />
+              <ProjectSettingsForm project={project} defaults={platformDefaults} orgSlug={project.organisation.slug} />
             </section>
           ) : null}
 

@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { publish } from "@/lib/agent-api/events";
 import { findSimilarIssues } from "@/lib/agent-api/create-policy";
+import { checkAttachment } from "@/lib/attachments";
 import { stripGitHubMarkup } from "@/lib/github-paste";
 import { prisma } from "@/lib/prisma";
 import {
@@ -11,6 +12,7 @@ import {
   type RateLimitItem,
 } from "@/lib/rate-limit";
 import { reportSummarySchema } from "@/lib/validations/report-summary";
+import { draftReportFromPrompt } from "@/lib/public-idea-draft";
 import {
   publicReporterEmail,
   publicTrackingTokenHash,
@@ -53,11 +55,12 @@ const publicSummarySchema = z
 const publicTitleSchema = publicText("Title", 200, 3)
   .refine((value) => !/[\r\n]/.test(value), "Title must be one line.");
 
-export const publicIdeaSchema = z
+const rawPublicIdeaSchema = z
   .object({
-    title: publicTitleSchema,
-    summary: publicSummarySchema,
-    description: publicText("Description", 2400, 10),
+    prompt: publicText("Report", 2400).optional().default(""),
+    title: z.string().optional().default(""),
+    summary: z.string().optional().default(""),
+    description: z.string().optional().default(""),
     stepsToReproduce: publicText("Steps to reproduce", 1000).optional().default(""),
     expectedBehavior: publicText("Expected behaviour", 700).optional().default(""),
     actualBehavior: publicText("Actual behaviour", 700).optional().default(""),
@@ -65,7 +68,50 @@ export const publicIdeaSchema = z
     acknowledgeSimilar: z.boolean().optional().default(false),
     trackingToken: trackingTokenSchema,
   })
-  .strict()
+  .strict();
+
+export const publicIdeaSchema = rawPublicIdeaSchema
+  .transform((raw, ctx) => {
+    const cleanedDescription = cleanPublicText(raw.description || raw.prompt);
+    const drafted = draftReportFromPrompt(raw.prompt || raw.description);
+    const rawTitle = cleanPublicText(raw.title) || drafted.title;
+    const rawSummary = cleanPublicText(raw.summary) || drafted.summary;
+
+    const titleResult = publicTitleSchema.safeParse(rawTitle);
+    if (!titleResult.success) {
+      for (const issue of titleResult.error.issues) {
+        ctx.addIssue({ code: "custom", path: ["title"], message: issue.message });
+      }
+    }
+    const summaryResult = publicSummarySchema.safeParse(rawSummary);
+    if (!summaryResult.success) {
+      for (const issue of summaryResult.error.issues) {
+        ctx.addIssue({ code: "custom", path: ["summary"], message: issue.message });
+      }
+    }
+    const descriptionResult = publicText("Description", 2400, 10).safeParse(cleanedDescription);
+    if (!descriptionResult.success) {
+      for (const issue of descriptionResult.error.issues) {
+        ctx.addIssue({
+          code: "custom",
+          path: raw.prompt && !raw.description ? ["prompt"] : ["description"],
+          message: issue.message,
+        });
+      }
+    }
+
+    return {
+      title: titleResult.success ? titleResult.data : rawTitle,
+      summary: summaryResult.success ? summaryResult.data : rawSummary,
+      description: descriptionResult.success ? descriptionResult.data : cleanedDescription,
+      stepsToReproduce: raw.stepsToReproduce,
+      expectedBehavior: raw.expectedBehavior,
+      actualBehavior: raw.actualBehavior,
+      website: raw.website,
+      acknowledgeSimilar: raw.acknowledgeSimilar,
+      trackingToken: raw.trackingToken,
+    };
+  })
   .superRefine((value, ctx) => {
     if (publicIdeaDescription(value).length > 5000) {
       ctx.addIssue({ code: "custom", path: ["description"], message: "The complete report must be 5,000 characters or fewer." });
@@ -89,12 +135,20 @@ export type PublicIdeaResult =
   | { status: 413; error: "too_large"; message: string }
   | { status: 429; error: "rate_limited"; message: string; retryAfterSeconds: number };
 
-type PublicIntakeDb = Pick<PrismaClient, "project" | "idea" | "bug" | "user" | "agentEvent" | "webhookSubscription" | "$queryRaw" | "$transaction">;
+export type PublicIdeaScreenshot = {
+  bytes: Uint8Array;
+  filename: string;
+};
+
+type PublicIntakeDb = Pick<PrismaClient, "project" | "idea" | "bug" | "user" | "agentEvent" | "webhookSubscription" | "$queryRaw" | "$transaction"> & {
+  attachment?: Pick<PrismaClient["attachment"], "create">;
+};
 
 type PublicIdeaDependencies = {
   db?: PublicIntakeDb;
   consume?: (items: RateLimitItem[]) => Promise<{ allowed: boolean; retryAfterMs: number }>;
   emit?: typeof publish;
+  screenshot?: PublicIdeaScreenshot | null;
 };
 
 function publicIdeaDescription(input: Pick<PublicIdeaInput, "description" | "stepsToReproduce" | "expectedBehavior" | "actualBehavior">): string {
@@ -179,6 +233,25 @@ export async function createPublicIdea(
     return { status: 400, error: "bot_detected", message: "The report could not be submitted." };
   }
 
+  let validatedScreenshot: { filename: string; contentType: string; bytes: Uint8Array } | null = null;
+  if (dependencies.screenshot) {
+    const checked = checkAttachment(dependencies.screenshot.bytes, dependencies.screenshot.filename);
+    if (!checked.ok || checked.kind !== "image") {
+      const reason = !checked.ok ? checked.error : "Screenshot must be a PNG, JPG, GIF, or WebP image.";
+      return {
+        status: 400,
+        error: "invalid_request",
+        message: reason,
+        fieldErrors: { screenshot: [reason] },
+      };
+    }
+    validatedScreenshot = {
+      filename: checked.filename,
+      contentType: checked.contentType,
+      bytes: dependencies.screenshot.bytes,
+    };
+  }
+
   const db = dependencies.db ?? prisma;
   const project = await db.project.findFirst({
     where: {
@@ -261,6 +334,21 @@ export async function createPublicIdea(
         },
         select: { id: true, number: true },
       });
+      if (validatedScreenshot) {
+        const attachmentRepo = (tx as unknown as PublicIntakeDb).attachment;
+        if (attachmentRepo) {
+          await attachmentRepo.create({
+            data: {
+              uploaderId: reporter.id,
+              ideaId: created.id,
+              filename: validatedScreenshot.filename,
+              contentType: validatedScreenshot.contentType,
+              size: validatedScreenshot.bytes.byteLength,
+              data: Buffer.from(validatedScreenshot.bytes),
+            },
+          });
+        }
+      }
       await emit(tx, {
         organisationId: project.organisationId,
         projectId: project.id,
