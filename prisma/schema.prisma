@@ -411,6 +411,7 @@ model IssueType {
 }
 
 model Bug {
+  marketingCredentialGrants MarketingCredentialGrant[]
   featurePlanItems          FeaturePlanItem[]
   previewBuilds             PreviewBuild[]
   pullRequestLinkRepairs    PullRequestLinkRepair[]
@@ -954,6 +955,7 @@ model Project {
   mistakes              AgentMistake[]
   notes                 ProjectNotes?
   brief                 ProjectBrief?
+  marketingCredentials  MarketingCredential[]
   noteRevisions         ProjectNoteRevision[]
   noteComments          ProjectNoteComment[]
   memberships           ProjectMembership[]
@@ -2927,6 +2929,50 @@ model ProjectBrief {
   outOfScope   String?
   updatedAt    DateTime @updatedAt
   project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+/// A login or token a client hands over so agents can publish or send for them.
+/// The secret is sealed (AES-256-GCM, bound to this row's id) in `sealed` and is
+/// never returned by any list or read route. Agents only get it through a
+/// per-task lease (lib/marketing/credentials.ts). See docs/marketing-notes-and-vault.md.
+model MarketingCredential {
+  id              String    @id
+  organisationId  String
+  projectId       String
+  /// "wordpress_app_password", "api_token" or "other".
+  kind            String
+  /// What the owner calls it: "Blog WordPress".
+  label           String
+  /// Where it works, shown to the owner: "https://blog.example.com".
+  serviceUrl      String?
+  /// "v1.<keyId>.<iv>.<tag>.<ciphertext>". Never plain text.
+  sealed          String
+  createdByUserId String
+  revokedAt       DateTime?
+  revokedByUserId String?
+  lastUsedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  grants          MarketingCredentialGrant[]
+
+  @@index([projectId, revokedAt])
+  @@index([organisationId])
+}
+
+/// The owner lets the agent working one marketing task use one credential, for a limited time.
+model MarketingCredentialGrant {
+  id              String    @id @default(cuid())
+  credentialId    String
+  bugId           String
+  grantedByUserId String
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  credential      MarketingCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  bug             Bug       @relation(fields: [bugId], references: [id], onDelete: Cascade)
+
+  @@unique([credentialId, bugId])
+  @@index([bugId])
 }
 
 model ProjectNotes {
