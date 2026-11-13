@@ -87,7 +87,7 @@ import { UnwatchButton, UnwatchFinishedButton } from "@/components/unwatch-butto
 import { parseTagFilter, serializeTags, tagTypeIds } from "@/lib/tag-filter";
 import { bugInOrganisation, isMissingOrganisationColumnError } from "@/lib/organisation-context";
 import { requireProject } from "@/lib/project-route";
-import { ideasPath, issuesPath, orgPath, projectPath, type ProjectRef } from "@/lib/project-paths";
+import { designPath, ideasPath, issuesPath, orgPath, projectPath, type ProjectRef } from "@/lib/project-paths";
 import { RichText } from "@/components/rich-text";
 import { isOrganisationAdmin } from "@/lib/organisation-role";
 import { cookies } from "next/headers";
@@ -1582,10 +1582,11 @@ export async function IssuesList({
             askOnLoad={isIdeasView && unconfiguredAgents.length === 0}
           />
         ) : null}
-        {/* Project notes and settings, as icons, beside the tabs. */}
+        {/* Project notes, Design and settings, as icons, beside the tabs. */}
         {!isDeletedView ? (
           <ProjectIconLinks
             notesHref={canContribute ? projectPath(ref, "/notes") : undefined}
+            designHref={isOrgMember ? designPath(ref) : undefined}
             settingsHref={isOrgAdmin ? `/projects/${encodeURIComponent(slug)}/settings` : undefined}
           />
         ) : null}

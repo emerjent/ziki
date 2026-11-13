@@ -103,6 +103,11 @@ export function newIssuePath(slug: ProjectRef, query?: URLSearchParams | string)
   return withQuery(projectPath(slug, "/issues/new"), query);
 }
 
+/** The project's Design area (#9): `/<org>/<project>/design`, or one proposal's page, `/<org>/<project>/design/<id>`. */
+export function designPath(slug: ProjectRef, proposalId?: string, query?: URLSearchParams | string): string {
+  return withQuery(projectPath(slug, proposalId ? `/design/${encodeURIComponent(proposalId)}` : "/design"), query);
+}
+
 /** One goal's page with its split wizard and allocation ledger: `/<org>/<project>/goals/<id>`. */
 export function goalPath(slug: ProjectRef, goalId: string): string {
   return projectPath(slug, `/goals/${encodeURIComponent(goalId)}`);

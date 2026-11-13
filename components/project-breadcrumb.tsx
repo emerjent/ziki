@@ -3,7 +3,7 @@
 import { Fragment } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ideasPath, marketingPath, orgHomePath, projectPath, projectRef, type ProjectRef } from "@/lib/project-paths";
+import { designPath, ideasPath, marketingPath, orgHomePath, projectPath, projectRef, type ProjectRef } from "@/lib/project-paths";
 
 /** The organisation's slug, and the project (none on the organisation's own page). */
 export type BreadcrumbProject = { orgSlug: string; slug?: string; name?: string };
@@ -70,7 +70,9 @@ function sectionOf(pathname: string, ref: ProjectRef): Crumb[] {
     if (!second) return named("Feature plans");
     return [{ label: "Feature plans", href: projectPath(ref, "/features") }, { label: second === "new" ? "New plan" : "Plan" }];
   }
-  const pages: Record<string, string> = { notes: "Notes", org: "Organisation", workstream: "Workstream", report: "Report an issue", import: "Import delivered work" };
+  // The Design area (#9): its list, and one proposal under it.
+  if (first === "design" && second) return [{ label: "Design", href: designPath(ref) }, { label: "Proposal" }];
+  const pages: Record<string, string> = { notes: "Notes", design: "Design", org: "Organisation", workstream: "Workstream", report: "Report an issue", import: "Import delivered work" };
   return pages[first] ? named(pages[first]) : [];
 }
 
