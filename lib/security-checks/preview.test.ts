@@ -3,6 +3,9 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
+const github = vi.hoisted(() => ({ getOrNull: vi.fn(), auth: "token" }));
+vi.mock("@/lib/github/client", () => ({ githubClientFor: vi.fn(async () => github) }));
+vi.mock("@/lib/logger", () => ({ logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
 import { setRateLimitStore } from "@/lib/rate-limit";
 import { PREVIEW_SCANS_PER_VISITOR_PER_HOUR } from "@/lib/security-checks";
@@ -305,5 +308,41 @@ describe("preview scan of a public repo (13 Nov)", () => {
     await previewScan("github.com/settle/app", { visitor: "same", network: net, now: NOW });
     await previewScan("github.com/settle/app", { visitor: "same", network: net, now: NOW + 60_000 });
     expect(repo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("reading a public repo through Ziki's GitHub client (13 Nov)", () => {
+  // A block body: returning the mock would make Vitest call it again as the test's cleanup.
+  beforeEach(() => {
+    github.getOrNull.mockReset();
+  });
+
+  it("reads the names at the top level, in .github and in docs, and nothing else", async () => {
+    github.getOrNull.mockImplementation(async (path: string) => ({
+      "/repos/settle/app/contents": [{ name: "README.md", type: "file" }, { name: ".github", type: "dir" }, { name: "docs", type: "dir" }],
+      "/repos/settle/app/contents/.github": [{ name: "dependabot.yml" }],
+      "/repos/settle/app/contents/docs": [{ name: "SECURITY.md" }],
+    })[path] ?? null);
+    expect(await realPreviewNetwork.repo("settle", "app")).toEqual({ status: "ok", root: ["README.md", ".github", "docs"], github: ["dependabot.yml"], docs: ["SECURITY.md"] });
+    expect(github.getOrNull).toHaveBeenCalledTimes(3);
+  });
+
+  it("only looks inside .github and docs when the top level has them", async () => {
+    github.getOrNull.mockResolvedValue([{ name: "README.md" }]);
+    expect(await realPreviewNetwork.repo("settle", "app")).toEqual({ status: "ok", root: ["README.md"], github: [], docs: [] });
+    expect(github.getOrNull).toHaveBeenCalledTimes(1);
+  });
+
+  it("says not found for a private or missing repo", async () => {
+    github.getOrNull.mockResolvedValue(null);
+    expect(await realPreviewNetwork.repo("settle", "private")).toEqual({ status: "not_found" });
+  });
+
+  it("says unavailable, and never throws, when GitHub fails or is limiting Ziki", async () => {
+    github.getOrNull.mockImplementation(async () => {
+      throw Object.assign(new Error("Ziki has used up its GitHub rate limit for now."), { status: 403 });
+    });
+    const answer = await realPreviewNetwork.repo("settle", "busy").catch((error: unknown) => ({ threw: String(error) }));
+    expect(answer).toEqual({ status: "unavailable" });
   });
 });
