@@ -562,25 +562,26 @@ const USER_AGENT = "ZikiSecurityPreview/1.0 (+https://ziki.dev/security)";
 export const realPreviewNetwork: PreviewNetwork = {
   async repo(owner, name) {
     // Public data only. Ziki's GitHub App is used when it covers the repo (its limit is the highest), else Ziki's token, else none.
+    // Those can see private repos too, so a repo is only looked into once GitHub says it is public: what the quick look reads
+    // is what any visitor to github.com sees, never more.
     const installationId = await installationIdForRepo(owner, name).catch(() => null);
     const github = await githubClientFor({ githubInstallationId: installationId });
+    const base = `/repos/${owner}/${name}`;
     let detail = "";
-    const namesIn = (body: unknown): string[] =>
-      Array.isArray(body) ? body.flatMap((entry) => (typeof (entry as { name?: unknown })?.name === "string" ? [(entry as { name: string }).name] : [])) : [];
-    const viaClient = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
+    const viaClient = async (suffix: string): Promise<unknown | "not_found" | "unavailable"> => {
       try {
-        const body = await github.getOrNull<unknown>(`/repos/${owner}/${name}/contents${path}`);
-        return body === null ? "not_found" : namesIn(body);
+        const body = await github.getOrNull<unknown>(`${base}${suffix}`);
+        return body === null ? "not_found" : body;
       } catch (error) {
         detail = error instanceof GitHubError && error.status ? `GitHub answered ${error.status}` : "Ziki couldn't reach GitHub";
-        logger.warn(`[security-preview] couldn't read ${owner}/${name}${path} from GitHub (${github.auth}): ${detail}`, error instanceof Error ? error.message : error);
+        logger.warn(`[security-preview] couldn't read ${owner}/${name}${suffix} from GitHub (${github.auth}): ${detail}`, error instanceof Error ? error.message : error);
         return "unavailable";
       }
     };
     // A token GitHub rejects, or a spent limit on it, shouldn't stop a look at a public repo: ask once with no token at all.
-    const anonymously = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
+    const anonymously = async (suffix: string): Promise<unknown | "not_found" | "unavailable"> => {
       try {
-        const response = await fetch(`${githubApiUrl()}/repos/${owner}/${name}/contents${path}`, {
+        const response = await fetch(`${githubApiUrl()}${base}${suffix}`, {
           headers: { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT },
           signal: AbortSignal.timeout(TIMEOUT_MS),
           cache: "no-store",
@@ -590,25 +591,39 @@ export const realPreviewNetwork: PreviewNetwork = {
           detail ||= `GitHub answered ${response.status}`;
           return "unavailable";
         }
-        return namesIn(await response.json());
+        return await response.json();
       } catch {
         detail ||= "Ziki couldn't reach GitHub";
         return "unavailable";
       }
     };
-    const names = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
-      const first = await viaClient(path);
-      return first === "unavailable" && github.auth !== "none" ? anonymously(path) : first;
+    const read = async (suffix: string): Promise<unknown | "not_found" | "unavailable"> => {
+      const first = await viaClient(suffix);
+      return first === "unavailable" && github.auth !== "none" ? anonymously(suffix) : first;
     };
-    const root = await names("");
+    const namesIn = (body: unknown): string[] =>
+      Array.isArray(body) ? body.flatMap((entry) => (typeof (entry as { name?: unknown })?.name === "string" ? [(entry as { name: string }).name] : [])) : [];
+
+    const repo = await read("");
+    if (repo === "not_found") return { status: "not_found" };
+    if (repo === "unavailable") return { status: "unavailable", detail };
+    // Private, or not clearly public: treated as not seen, so nothing about it is read.
+    if ((repo as { private?: unknown } | null)?.private !== false) return { status: "not_found" };
+
+    const root = await read("/contents");
     if (root === "not_found") return { status: "not_found" };
     if (root === "unavailable") return { status: "unavailable", detail };
+    const rootNames = namesIn(root);
     // A policy can sit in .github or docs; the update bot's setup sits in .github. A folder that can't be read counts as empty.
+    const folder = async (suffix: string) => {
+      const body = await read(suffix);
+      return body === "not_found" || body === "unavailable" ? [] : namesIn(body);
+    };
     const [dotGithub, docs] = await Promise.all([
-      root.includes(".github") ? names("/.github") : Promise.resolve([] as string[]),
-      root.includes("docs") ? names("/docs") : Promise.resolve([] as string[]),
+      rootNames.includes(".github") ? folder("/contents/.github") : Promise.resolve([] as string[]),
+      rootNames.includes("docs") ? folder("/contents/docs") : Promise.resolve([] as string[]),
     ]);
-    return { status: "ok", root, github: Array.isArray(dotGithub) ? dotGithub : [], docs: Array.isArray(docs) ? docs : [] };
+    return { status: "ok", root: rootNames, github: dotGithub, docs };
   },
   async page(url) {
     const target = new URL(url);
