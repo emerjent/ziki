@@ -1,0 +1,27 @@
+name: Platform sweeps
+
+on:
+  schedule:
+    # Backstop for GitHub webhooks: refresh merge-queue state, dispatch
+    # webhooks, and run the other platform sweeps. Best-effort schedule;
+    # webhooks remain the fast path.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call the cron endpoint
+        run: |
+          response=$(curl -sS --max-time 240 -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://ziki.dev/api/internal/cron)
+          body=$(printf '%s' "$response" | head -n 1)
+          status=$(printf '%s' "$response" | tail -n 1)
+          echo "$body"
+          if [ "$status" != "200" ]; then
+            echo "::error::Cron endpoint answered HTTP $status"
+            exit 1
+          fi
