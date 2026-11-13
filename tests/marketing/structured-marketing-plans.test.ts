@@ -22,11 +22,12 @@ const channelId = "3e3c95a0-a332-4c89-a17e-9d09dfb0890e";
 const activityId = "5a3b76a5-af68-4d36-92f9-996e95617750";
 const strategy = {
   businessSummary: { text: "A local bakery.", basis: "customer_input" as const },
+  assumptions: [],
   objectives: [{ id: "d7e67193-8a47-44f9-9d20-8220ed13bd38", text: "Increase visits.", basis: "customer_input" as const }],
   audiences: [{ id: "466bbab3-c5c8-44b5-bc4c-c6c9c5c25b5d", description: "Nearby residents.", basis: "customer_input" as const }],
-  channels: [{ id: channelId, name: "Email", rationale: "Reach returning customers." }],
+  channels: [{ id: channelId, name: "Email", rationale: "Reach returning customers.", basis: "recommendation" as const }],
   activities: [{
-    id: activityId, channelId, title: "Monthly newsletter", description: "Send a seasonal update.", priority: "medium" as const,
+    id: activityId, channelId, title: "Monthly newsletter", description: "Send a seasonal update.", basis: "recommendation" as const, priority: "medium" as const,
     budget: { amount: null, currency: null }, suggestedStart: null, suggestedEnd: null,
     dependencies: [], expectedOutcome: "More repeat visits.", measurements: ["Redemptions"],
   }],

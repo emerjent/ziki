@@ -87,7 +87,8 @@ describe("talkToSecurityAssistant (#security-checks, plan C3)", () => {
     // The scan reads its link back through the same parser, so a repo must go in as a GitHub address, not "owner/name".
     expect(mocks.preview).toHaveBeenCalledWith("github.com/settle/app", { visitor: "user:u1" });
     expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
-    expect(answer).toMatchObject({ kind: "scan", target: "settle/app", summary: { kind: "repo", total: 2, risk: "high" } });
+    // The card's target is what Show it's yours sends back to be added, so it has to be an address the parser accepts.
+    expect(answer).toMatchObject({ kind: "scan", target: "github.com/settle/app", summary: { kind: "repo", total: 2, risk: "high" } });
     expect(JSON.stringify(answer)).not.toContain("SECRET");
   });
 

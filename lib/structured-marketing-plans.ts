@@ -41,6 +41,10 @@ async function accessibleProject(user: SessionAppUser, projectId: string) {
   return project;
 }
 
+export async function assertMarketingPlanProjectAccess(user: SessionAppUser, projectId: string) {
+  return accessibleProject(user, projectId);
+}
+
 async function storeActivities(
   tx: Prisma.TransactionClient,
   planId: string,

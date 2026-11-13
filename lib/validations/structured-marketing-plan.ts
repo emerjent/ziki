@@ -24,6 +24,7 @@ const channelSchema = z.object({
   id: stableId,
   name: text(120),
   rationale: text(1000),
+  basis: z.enum(["customer_input", "derived", "recommendation", "unknown"]),
 }).strict();
 
 export const marketingPlanActivitySchema = z.object({
@@ -32,6 +33,7 @@ export const marketingPlanActivitySchema = z.object({
   channelId: stableId.nullable(),
   title: text(160),
   description: text(4000),
+  basis: z.enum(["customer_input", "derived", "recommendation", "unknown"]),
   priority: z.enum(["high", "medium", "low"]),
   budget: z.object({
     amount: z.number().finite().nonnegative().nullable(),
@@ -57,6 +59,7 @@ export const marketingPlanStrategySchema = z.object({
     text: text(2000),
     basis: z.enum(["customer_input", "derived", "unknown"]),
   }).strict(),
+  assumptions: z.array(text(500)).max(20),
   objectives: z.array(sourcedTextSchema).max(20),
   audiences: z.array(audienceSchema).max(20),
   channels: z.array(channelSchema).max(20),

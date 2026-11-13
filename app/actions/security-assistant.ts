@@ -5,7 +5,7 @@ import { requireUser } from "@/lib/auth-helpers";
 import { currentOrganisationAccess } from "@/lib/organisation-access";
 import { checkRateLimit, RATE_LIMIT_MESSAGE } from "@/lib/rate-limit";
 import { OWNERS_ONLY_MESSAGE } from "@/lib/security-checks";
-import { parseSecurityTarget, PRIVATE_TARGET_ERROR } from "@/lib/security-checks/target";
+import { parseSecurityTarget, PRIVATE_TARGET_ERROR, targetAddress } from "@/lib/security-checks/target";
 import { addTargetAndCheck, nextStepPath, refusedMessage, saveQuickScan } from "@/lib/security-checks/entry";
 import { previewScan } from "@/lib/security-checks/preview";
 import { summarisePreview, type PreviewSummary } from "@/lib/security-checks/preview-summary";
@@ -82,7 +82,7 @@ export async function addSecurityAsset(link: string): Promise<ChatAnswer> {
   if (!parsed.ok) return { kind: "error", error: parsed.error };
   // The quick scan the client just saw, run again here (Dave's scan keeps it for ten minutes) rather than trusted from the page.
   let summary: PreviewSummary | null = null;
-  const result = await previewScan(previewLink(parsed.target), { visitor: `user:${user.id}` });
+  const result = await previewScan(targetAddress(parsed.target), { visitor: `user:${user.id}` });
   if (result.ok) summary = summarisePreview(result);
   return addAndGo(access.organisationId, user.id, parsed.target, "", summary);
 }
@@ -94,14 +94,11 @@ export async function addSecurityAsset(link: string): Promise<ChatAnswer> {
  * only hit the limit still can.
  */
 async function scanOrGo(userId: string, target: ParsedTarget, reply: string): Promise<ChatAnswer> {
-  const result = await previewScan(previewLink(target), { visitor: `user:${userId}` });
-  if (!result.ok) return { kind: "scan", reply, target: target.value, summary: null, note: result.reason, canAdd: target.kind === "repo" || result.retryAfterSeconds !== undefined };
-  return { kind: "scan", reply, target: target.value, summary: summarisePreview(result), note: null, canAdd: true };
-}
-
-/** What the scan is given for a target: a repo's value is just "owner/name", which the scan reads back as a link, so give it the GitHub address. */
-function previewLink(target: ParsedTarget): string {
-  return target.kind === "repo" ? `github.com/${target.value}` : target.value;
+  // The card carries the address (a repo's GitHub address), because its Show it's yours button sends it back to be added.
+  const address = targetAddress(target);
+  const result = await previewScan(address, { visitor: `user:${userId}` });
+  if (!result.ok) return { kind: "scan", reply, target: address, summary: null, note: result.reason, canAdd: target.kind === "repo" || result.retryAfterSeconds !== undefined };
+  return { kind: "scan", reply, target: address, summary: summarisePreview(result), note: null, canAdd: true };
 }
 
 async function addAndGo(
