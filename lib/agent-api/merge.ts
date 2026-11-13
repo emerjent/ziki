@@ -73,6 +73,7 @@ import { sameCommit } from "@/lib/github/commit-sha";
  */
 
 export const mergeBugSelect = {
+  outsideWork: { select: { agentId: true } },
   id: true,
   title: true,
   organisationId: true,
@@ -845,6 +846,8 @@ async function acceptMarketing(
 type RecordValue = string | number | boolean | null;
 
 export type FinalizeResolvedInput = {
+  /** Imported work has a real delivery and no claim; keep its agent attribution. */
+  solverAgentId?: string | null;
   agent: AgentContext;
   bug: Pick<MergeBug, "id" | "organisationId" | "projectId" | "status" | "substatus" | "pullRequestUrl">;
   claim: MergeClaim;
@@ -912,7 +915,7 @@ export async function finalizeResolved(tx: Prisma.TransactionClient, input: Fina
       points: solverReward(reward),
       sourceKey: pointSourceKey("solver", bug.id, solverUserId),
       // The agent that held the claim and delivered the work.
-      agentId: claim?.agentId ?? null,
+      agentId: claim?.agentId ?? input.solverAgentId ?? null,
     });
   }
   if (claim?.dispatcherUserId) {

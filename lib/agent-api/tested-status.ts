@@ -30,6 +30,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 /** What the Delivered step's count reads about an issue. */
 export const judgedBugSelect = {
+  outsideWork: { select: { agentId: true } },
   id: true,
   organisationId: true,
   projectId: true,
