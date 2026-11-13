@@ -179,8 +179,9 @@ export async function retryUrlVerificationAction(
     where: { id: deliveryId },
     select: {
       id: true,
+      currentSequence: true,
       publishedUrls: true,
-      bug: { select: { projectId: true, organisationId: true } },
+      bug: { select: { id: true, projectId: true, organisationId: true } },
     },
   });
 
@@ -192,14 +193,88 @@ export async function retryUrlVerificationAction(
     return { ok: false, error: "No published URLs associated with this deliverable." };
   }
 
-  const batchResult = await verifyPublishedUrls(delivery.publishedUrls);
+  // Capture starting sequence and URLs to prevent race conditions and stale overwrites
+  const startingSequence = delivery.currentSequence;
+  const startingUrls = [...delivery.publishedUrls];
 
-  await prisma.delivery.update({
-    where: { id: deliveryId },
-    data: {
-      verificationEvidence: batchResult as unknown as Prisma.InputJsonValue,
-    },
+  const batchResult = await verifyPublishedUrls(startingUrls);
+
+  const result = await prisma.$transaction(async (tx) => {
+    // Acquire row lock to ensure sequence atomicity
+    await tx.$queryRaw`SELECT "id" FROM "Delivery" WHERE "id" = ${deliveryId} FOR UPDATE`;
+
+    const current = await tx.delivery.findUnique({
+      where: { id: deliveryId },
+      select: { currentSequence: true, publishedUrls: true },
+    });
+
+    const urlsMatch =
+      current &&
+      current.publishedUrls.length === startingUrls.length &&
+      current.publishedUrls.every((u, i) => u === startingUrls[i]);
+
+    if (!current || current.currentSequence !== startingSequence || !urlsMatch) {
+      await tx.bugActivity.create({
+        data: {
+          bugId: delivery.bug.id,
+          actorId: context.user.id,
+          type: "status_changed",
+          summary: `Marketing deliverable URL verification discarded: newer submission sequence or URL change detected (checked sequence ${startingSequence}, current is ${current?.currentSequence ?? "unknown"})`,
+          metadata: {
+            field: "verificationEvidence",
+            action: "retry_verification",
+            stale: true,
+            startingSequence,
+            currentSequence: current?.currentSequence ?? null,
+            deliveryId,
+          },
+        },
+      });
+
+      return {
+        ok: false as const,
+        error: "Stale verification result: deliverable was updated while verification was in progress.",
+      };
+    }
+
+    await tx.delivery.update({
+      where: { id: deliveryId },
+      data: {
+        verificationEvidence: batchResult as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    const failedCount = batchResult.results.filter((r) => !r.ok).length;
+    const summary = batchResult.allOk
+      ? `Marketing deliverable URL verification passed (${startingUrls.length} URL${startingUrls.length === 1 ? "" : "s"} verified)`
+      : `Marketing deliverable URL verification failed (${failedCount} of ${startingUrls.length} unreachable)`;
+
+    await tx.bugActivity.create({
+      data: {
+        bugId: delivery.bug.id,
+        actorId: context.user.id,
+        type: "status_changed",
+        summary,
+        metadata: {
+          field: "verificationEvidence",
+          action: "retry_verification",
+          deliveryId,
+          sequence: startingSequence,
+          allOk: batchResult.allOk,
+          totalUrls: startingUrls.length,
+          failedCount,
+          results: batchResult.results.map((r) => ({
+            url: r.url,
+            ok: r.ok,
+            status: r.status,
+            error: r.error,
+          })),
+        },
+      },
+    });
+
+    return { ok: true as const, evidence: batchResult };
   });
 
-  return { ok: true, evidence: batchResult };
+  return result;
 }

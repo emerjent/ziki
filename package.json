@@ -11,6 +11,7 @@
     "check": "node scripts/verify.mjs ready",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run tests/work/marketing-concurrency-real.test.ts",
     "test:watch": "vitest",
     "verify:quick": "node scripts/verify.mjs quick",
     "verify:ready": "node scripts/verify.mjs ready",

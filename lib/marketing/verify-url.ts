@@ -98,71 +98,163 @@ function isDisallowedIPv4(ip: string): boolean {
   return false;
 }
 
-function isDisallowedIPv6(ip: string): boolean {
-  // Normalize IPv6 address
-  const lower = ip.toLowerCase();
-
-  // Unspecified (::)
-  if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
-
-  // Loopback (::1)
-  if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
-
-  // IPv4-mapped or IPv4-compatible IPv6: ::ffff:x.x.x.x or ::x.x.x.x
-  if (lower.includes(".")) {
-    const lastPart = lower.split(":").pop();
-    if (lastPart && net.isIP(lastPart) === 4) {
-      return isDisallowedIPv4(lastPart);
-    }
+/**
+ * Parses and normalizes an IPv6 address string into an 8-element array of 16-bit integers.
+ * Handles compressed (::), expanded, uppercase/lowercase, and dotted or hex embedded IPv4 formats.
+ */
+export function parseIPv6(rawIp: string): number[] | null {
+  let ip = rawIp.trim().toLowerCase();
+  if (ip.startsWith("[") && ip.endsWith("]")) {
+    ip = ip.slice(1, -1);
   }
 
-  // Parse first hextet
-  const segments = lower.split(":");
-  const firstHextet = segments[0] || (segments[1] && segments[0] === "" ? segments[1] : "");
-  const firstVal = Number.parseInt(firstHextet || "0", 16);
-
-  if (!Number.isNaN(firstVal)) {
-    // Unique-local addresses: fc00::/7 (covers fc00..fdff)
-    if ((firstVal & 0xfe00) === 0xfc00) return true;
-
-    // Link-local unicast: fe80::/10 (covers fe80..febf)
-    if ((firstVal & 0xffc0) === 0xfe80) return true;
-
-    // Site-local (deprecated RFC 3879): fec0::/10
-    if ((firstVal & 0xffc0) === 0xfec0) return true;
-
-    // Multicast: ff00::/8
-    if ((firstVal & 0xff00) === 0xff00) return true;
-
-    // Discard prefix: 100::/64
-    if (firstVal === 0x0100) return true;
-
-    // 6to4: 2002::/16 - embed IPv4 in bits 16..47
-    if (firstVal === 0x2002) {
-      const h1 = Number.parseInt(segments[1] || "0", 16);
-      const h2 = Number.parseInt(segments[2] || "0", 16);
-      if (!Number.isNaN(h1) && !Number.isNaN(h2)) {
-        const b0 = (h1 >> 8) & 0xff;
-        const b1 = h1 & 0xff;
-        const b2 = (h2 >> 8) & 0xff;
-        const b3 = h2 & 0xff;
-        const embeddedIp = `${b0}.${b1}.${b2}.${b3}`;
-        if (isDisallowedIPv4(embeddedIp)) return true;
+  // Handle embedded IPv4 at the end (e.g. ::ffff:192.168.1.1 or 64:ff9b::127.0.0.1)
+  const lastColon = ip.lastIndexOf(":");
+  if (lastColon !== -1) {
+    const afterColon = ip.slice(lastColon + 1);
+    if (afterColon.includes(".")) {
+      const v4Parts = afterColon.split(".").map((p) => Number.parseInt(p, 10));
+      if (v4Parts.length !== 4 || v4Parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
+        return null;
       }
+      const h6 = (v4Parts[0] << 8) | v4Parts[1];
+      const h7 = (v4Parts[2] << 8) | v4Parts[3];
+      const prefix = ip.slice(0, lastColon);
+      ip = `${prefix}:${h6.toString(16)}:${h7.toString(16)}`;
     }
-
-    // Documentation: 2001:db8::/32
-    if (firstVal === 0x2001 && lower.includes("2001:db8:")) return true;
-
-    // Benchmarking: 2001:2::/48
-    if (firstVal === 0x2001 && (lower.includes("2001:2:") || lower.startsWith("2001:2::"))) return true;
-
-    // Orchid / Orchidv2: 2001:20::/28
-    if (firstVal === 0x2001 && (lower.includes("2001:20:") || lower.includes("2001:21:"))) return true;
-
-    // Teredo: 2001::/32
-    if (firstVal === 0x2001 && (lower.startsWith("2001:0:") || lower.startsWith("2001::"))) return true;
   }
+
+  const doubleColonParts = ip.split("::");
+  if (doubleColonParts.length > 2) {
+    return null;
+  }
+
+  let hextets: number[];
+  if (doubleColonParts.length === 2) {
+    const leftStr = doubleColonParts[0];
+    const rightStr = doubleColonParts[1];
+    const left = leftStr.length > 0 ? leftStr.split(":").map((h) => Number.parseInt(h, 16)) : [];
+    const right = rightStr.length > 0 ? rightStr.split(":").map((h) => Number.parseInt(h, 16)) : [];
+    if (left.some(Number.isNaN) || right.some(Number.isNaN)) {
+      return null;
+    }
+    const missing = 8 - (left.length + right.length);
+    if (missing < 0) return null;
+    hextets = [...left, ...new Array(missing).fill(0), ...right];
+  } else {
+    hextets = ip.split(":").map((h) => Number.parseInt(h, 16));
+    if (hextets.length !== 8 || hextets.some(Number.isNaN)) {
+      return null;
+    }
+  }
+
+  if (hextets.length !== 8 || hextets.some((h) => h < 0 || h > 0xffff)) {
+    return null;
+  }
+
+  return hextets;
+}
+
+function hextetsToBigInt(hextets: number[]): bigint {
+  let val = 0n;
+  for (const h of hextets) {
+    val = (val << 16n) | BigInt(h);
+  }
+  return val;
+}
+
+function matchCidr(ipBigInt: bigint, baseBigInt: bigint, prefixLen: number): boolean {
+  const shift = 128n - BigInt(prefixLen);
+  return (ipBigInt >> shift) === (baseBigInt >> shift);
+}
+
+export function isDisallowedIPv6(rawIp: string): boolean {
+  const hextets = parseIPv6(rawIp);
+  if (!hextets) {
+    return true; // Not a valid IPv6 address
+  }
+
+  const [h0, h1, h2, h3, h4, h5, h6, h7] = hextets;
+  const ipBigInt = hextetsToBigInt(hextets);
+
+  // Unspecified (::/128)
+  if (matchCidr(ipBigInt, 0n, 128)) return true;
+
+  // Loopback (::1/128)
+  if (matchCidr(ipBigInt, 1n, 128)) return true;
+
+  // IPv4-mapped IPv6 address (::ffff:0:0/96) in dotted or hex notation
+  // (e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1 or 0:0:0:0:0:ffff:7f00:0001)
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0xffff) {
+    const embeddedIp = `${(h6 >> 8) & 0xff}.${h6 & 0xff}.${(h7 >> 8) & 0xff}.${h7 & 0xff}`;
+    return isDisallowedIPv4(embeddedIp);
+  }
+
+  // IPv4-translated (SIIT) (::ffff:0:0:0/96)
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0xffff && h5 === 0) {
+    const embeddedIp = `${(h6 >> 8) & 0xff}.${h6 & 0xff}.${(h7 >> 8) & 0xff}.${h7 & 0xff}`;
+    return isDisallowedIPv4(embeddedIp);
+  }
+
+  // IPv4-compatible IPv6 (deprecated RFC 4291) (::/96)
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0) {
+    const embeddedIp = `${(h6 >> 8) & 0xff}.${h6 & 0xff}.${(h7 >> 8) & 0xff}.${h7 & 0xff}`;
+    return isDisallowedIPv4(embeddedIp);
+  }
+
+  // NAT64 Well-Known Prefix (64:ff9b::/96 - RFC 6052)
+  if (h0 === 0x0064 && h1 === 0xff9b && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0) {
+    const embeddedIp = `${(h6 >> 8) & 0xff}.${h6 & 0xff}.${(h7 >> 8) & 0xff}.${h7 & 0xff}`;
+    return isDisallowedIPv4(embeddedIp);
+  }
+
+  // NAT64 Local-Use (64:ff9b:1::/48 - RFC 8215)
+  if (matchCidr(ipBigInt, (0x0064n << 112n) | (0xff9bn << 96n) | (0x0001n << 80n), 48)) {
+    return true;
+  }
+
+  // 6to4 transition addresses (2002::/16 - RFC 3056)
+  // Encapsulates IPv4 address in bits 16..47 (hextets h1 and h2)
+  if (h0 === 0x2002) {
+    const b0 = (h1 >> 8) & 0xff;
+    const b1 = h1 & 0xff;
+    const b2 = (h2 >> 8) & 0xff;
+    const b3 = h2 & 0xff;
+    const embeddedIp = `${b0}.${b1}.${b2}.${b3}`;
+    return isDisallowedIPv4(embeddedIp);
+  }
+
+  // Teredo tunneling (2001:0000::/32 - RFC 4380)
+  if (h0 === 0x2001 && h1 === 0x0000) {
+    return true;
+  }
+
+  // Unique-Local Addresses ULA (fc00::/7 - RFC 4193, covers fc00..fdff)
+  if (matchCidr(ipBigInt, 0xfc00n << 112n, 7)) return true;
+
+  // Link-Local Unicast (fe80::/10 - RFC 4291, covers fe80..febf)
+  if (matchCidr(ipBigInt, 0xfe80n << 112n, 10)) return true;
+
+  // Site-Local Unicast (deprecated RFC 3879) (fec0::/10)
+  if (matchCidr(ipBigInt, 0xfec0n << 112n, 10)) return true;
+
+  // Multicast (ff00::/8 - RFC 4291)
+  if (matchCidr(ipBigInt, 0xff00n << 112n, 8)) return true;
+
+  // Discard-Only Prefix (100::/64 - RFC 6666)
+  if (matchCidr(ipBigInt, 0x0100n << 112n, 64)) return true;
+
+  // Documentation (2001:db8::/32 - RFC 3849)
+  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0db8n << 96n), 32)) return true;
+
+  // Benchmarking (2001:2::/48 - RFC 5180)
+  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0002n << 96n), 48)) return true;
+
+  // Deprecated Direct Root Name Service (2001:10::/28)
+  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0010n << 96n), 28)) return true;
+
+  // ORCHIDv2 (2001:20::/28 - RFC 7343)
+  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0020n << 96n), 28)) return true;
 
   return false;
 }

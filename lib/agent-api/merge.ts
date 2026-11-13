@@ -854,53 +854,80 @@ async function acceptMarketing(
   await tx.bug.update({ where: { id: bug.id }, data: moved });
   await closeSupportThreadsForIssue(tx, { bugId: bug.id, reason: "fix_live" });
 
-  // Update the active marketing delivery's status based on manager confirmation (#marketing-engine)
-  const delivery = await tx.delivery.findFirst({
-    where: {
-      bugId: bug.id,
-      ...(solverUserId ? { beneficiaryUserId: solverUserId } : {}),
-    },
-    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-  });
+  // Identify the actual accepted claim and its agent ID (#marketing-engine)
+  const acceptedClaim =
+    claim ??
+    bug.claims.find((c) => c.status === "active" && !c.releasedAt) ??
+    (await tx.issueClaim.findFirst({
+      where: { bugId: bug.id, status: "active", releasedAt: null },
+      select: { agentId: true, beneficiaryUserId: true },
+    })) ??
+    (await tx.issueClaim.findFirst({
+      where: { bugId: bug.id, status: "released", releaseReason: "accepted" },
+      orderBy: [{ releasedAt: "desc" }, { id: "desc" }],
+      select: { agentId: true, beneficiaryUserId: true },
+    })) ??
+    bug.claims.find((c) => c.status === "released" && (c as { releaseReason?: string }).releaseReason === "accepted") ??
+    bug.claims.find((c) => c.status === "released");
+
+  const acceptedAgentId = acceptedClaim?.agentId;
+
+  // Select the delivery belonging to that accepted agent; never use latest updatedAt as deciding factor
+  const delivery = acceptedAgentId
+    ? await tx.delivery.findUnique({
+        where: { bugId_agentId: { bugId: bug.id, agentId: acceptedAgentId } },
+      })
+    : await tx.delivery.findFirst({
+        where: {
+          bugId: bug.id,
+          ...(solverUserId ? { beneficiaryUserId: solverUserId } : {}),
+        },
+        orderBy: [{ id: "desc" }],
+      });
 
   if (delivery) {
     const publishedUrls = delivery.publishedUrls ?? [];
-    const confirmPub = review?.confirmPublication ?? (publishedUrls.length > 0);
+    // Explicit manager confirmation is required; missing or false confirmation never counts as confirmed
+    const confirmPub = review?.confirmPublication === true;
     let policyPassed = false;
     const manualOverridesRecorded: Array<{ url: string; reason: string }> = [];
 
-    if (confirmPub && publishedUrls.length > 0) {
-      const existingEvidence = delivery.verificationEvidence as {
-        results?: Array<{ url: string; ok: boolean; status?: number | null; error?: string }>;
-        [key: string]: unknown;
-      } | null;
+    if (confirmPub) {
+      if (publishedUrls.length > 0) {
+        const existingEvidence = delivery.verificationEvidence as {
+          results?: Array<{ url: string; ok: boolean; status?: number | null; error?: string }>;
+          [key: string]: unknown;
+        } | null;
 
-      const probeResults = existingEvidence?.results ?? [];
-      const manualOverrides = review?.manualOverrides ?? [];
-      const generalOverrideReason = review?.manualOverrideReason?.trim();
+        const probeResults = existingEvidence?.results ?? [];
+        const manualOverrides = review?.manualOverrides ?? [];
+        const generalOverrideReason = review?.manualOverrideReason?.trim();
 
-      let allUrlsSatisfied = true;
-      for (const url of publishedUrls) {
-        const probe = probeResults.find((p) => p.url === url);
-        const hasPassedProbe = probe?.ok === true;
+        let allUrlsSatisfied = true;
+        for (const url of publishedUrls) {
+          const probe = probeResults.find((p) => p.url === url);
+          const hasPassedProbe = probe?.ok === true;
 
-        const specificOverride = manualOverrides.find((o) => o.url === url && o.reason.trim().length >= 5);
-        const hasValidOverride = Boolean(specificOverride) || (Boolean(generalOverrideReason) && generalOverrideReason!.length >= 5);
+          const specificOverride = manualOverrides.find((o) => o.url === url && o.reason.trim().length >= 5);
+          const hasValidOverride = Boolean(specificOverride) || (Boolean(generalOverrideReason) && generalOverrideReason!.length >= 5);
 
-        if (!hasPassedProbe && !hasValidOverride) {
-          allUrlsSatisfied = false;
-          break;
+          if (!hasPassedProbe && !hasValidOverride) {
+            allUrlsSatisfied = false;
+            break;
+          }
+
+          if (!hasPassedProbe && (specificOverride || generalOverrideReason)) {
+            manualOverridesRecorded.push({
+              url,
+              reason: specificOverride?.reason.trim() ?? generalOverrideReason!,
+            });
+          }
         }
 
-        if (!hasPassedProbe && (specificOverride || generalOverrideReason)) {
-          manualOverridesRecorded.push({
-            url,
-            reason: specificOverride?.reason.trim() ?? generalOverrideReason!,
-          });
-        }
+        policyPassed = allUrlsSatisfied;
+      } else {
+        policyPassed = true;
       }
-
-      policyPassed = allUrlsSatisfied;
     }
 
     const nextStatus = policyPassed ? "live_published" : "ready_to_use";

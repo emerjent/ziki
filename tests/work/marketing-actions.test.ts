@@ -86,6 +86,7 @@ describe("Output Box Server Actions - Implementation Tracking & Verification", (
     db.deliveries.set("del_1", {
       id: "del_1",
       bugId: "bug_1",
+      currentSequence: 1,
       deliveryStatus: "ready_to_use",
       previousStatus: null,
       implementedAt: null,
@@ -213,5 +214,42 @@ describe("Output Box Server Actions - Implementation Tracking & Verification", (
     const updated = db.deliveries.get("del_1");
     expect(updated.verificationEvidence).toBeDefined();
     expect(updated.verificationEvidence.allOk).toBe(true);
+    expect(db.tx.bugActivity.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "status_changed",
+          summary: expect.stringContaining("Marketing deliverable URL verification passed"),
+        }),
+      }),
+    );
+  });
+
+  it("rejects stale verification results when delivery sequence has advanced", async () => {
+    // Stage delivery at sequence 1 initially, but during verification transaction it is at sequence 2
+    const checkedSequence = 1;
+    db.prisma.delivery.findUnique.mockImplementation(async ({ where }: any) => {
+      const del = db.deliveries.get(where.id);
+      return del ? { ...del, currentSequence: checkedSequence } : null;
+    });
+
+    db.tx.delivery.findUnique.mockImplementation(async ({ where }: any) => {
+      const del = db.deliveries.get(where.id);
+      // Simulate that by the time verification finishes and acquires lock, sequence advanced to 2
+      return del ? { ...del, currentSequence: 2 } : null;
+    });
+
+    const res = await retryUrlVerificationAction(slug, "del_1");
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("Stale verification result");
+
+    // Must record discarded audit history
+    expect(db.tx.bugActivity.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "status_changed",
+          summary: expect.stringContaining("discarded"),
+        }),
+      }),
+    );
   });
 });

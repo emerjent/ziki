@@ -51,6 +51,47 @@ describe("lib/marketing/verify-url", () => {
       expect(isDisallowedIp("::ffff:169.254.169.254")).toBe(true);
     });
 
+    it("handles expanded, uppercase, and alternative notations of prohibited IPv6 addresses", () => {
+      // Expanded loopback and unspecified
+      expect(isDisallowedIp("0000:0000:0000:0000:0000:0000:0000:0001")).toBe(true);
+      expect(isDisallowedIp("0:0:0:0:0:0:0:1")).toBe(true);
+      expect(isDisallowedIp("0000:0000:0000:0000:0000:0000:0000:0000")).toBe(true);
+      expect(isDisallowedIp("0:0:0:0:0:0:0:0")).toBe(true);
+
+      // Uppercase and mixed-case
+      expect(isDisallowedIp("FE80::1")).toBe(true);
+      expect(isDisallowedIp("FC00::ABCD")).toBe(true);
+      expect(isDisallowedIp("2001:DB8::1")).toBe(true);
+      expect(isDisallowedIp("2001:Db8:0:0:0:0:0:1")).toBe(true);
+
+      // Hexadecimal IPv4-mapped IPv6 representations
+      expect(isDisallowedIp("::ffff:7f00:1")).toBe(true); // 127.0.0.1 in hex
+      expect(isDisallowedIp("0:0:0:0:0:ffff:7f00:0001")).toBe(true);
+      expect(isDisallowedIp("::ffff:0a00:0001")).toBe(true); // 10.0.0.1 in hex
+      expect(isDisallowedIp("::ffff:c0a8:0101")).toBe(true); // 192.168.1.1 in hex
+      expect(isDisallowedIp("::ffff:a9fe:a9fe")).toBe(true); // 169.254.169.254 in hex
+
+      // 6to4 transition addresses (2002::/16)
+      expect(isDisallowedIp("2002:7f00:1::")).toBe(true); // 127.0.0.1
+      expect(isDisallowedIp("2002:0a00:0001::")).toBe(true); // 10.0.0.1
+      expect(isDisallowedIp("2002:c0a8:0101::")).toBe(true); // 192.168.1.1
+      expect(isDisallowedIp("2002:a9fe:a9fe::")).toBe(true); // 169.254.169.254
+
+      // NAT64 transition addresses (64:ff9b::/96 and 64:ff9b:1::/48)
+      expect(isDisallowedIp("64:ff9b::127.0.0.1")).toBe(true);
+      expect(isDisallowedIp("64:ff9b::7f00:1")).toBe(true);
+      expect(isDisallowedIp("64:ff9b::10.0.0.1")).toBe(true);
+      expect(isDisallowedIp("64:ff9b:1::1")).toBe(true);
+
+      // Teredo addresses (2001:0000::/32)
+      expect(isDisallowedIp("2001:0000:1234::1")).toBe(true);
+      expect(isDisallowedIp("2001:0:1234::1")).toBe(true);
+      expect(isDisallowedIp("2001::1234")).toBe(true);
+
+      // Discard-only prefix (100::/64)
+      expect(isDisallowedIp("100::1")).toBe(true);
+    });
+
     it("allows valid public IPv4 and IPv6 addresses", () => {
       expect(isDisallowedIp("8.8.8.8")).toBe(false);
       expect(isDisallowedIp("1.1.1.1")).toBe(false);

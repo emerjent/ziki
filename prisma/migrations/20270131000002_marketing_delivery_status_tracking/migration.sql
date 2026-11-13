@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE "Delivery" ADD COLUMN "publishedUrls" TEXT[] DEFAULT ARRAY[]::TEXT[],
+ALTER TABLE "Delivery" ADD COLUMN "publishedUrls" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
 ADD COLUMN "deliveryStatus" TEXT NOT NULL DEFAULT 'ready_to_use',
 ADD COLUMN "previousStatus" TEXT,
 ADD COLUMN "implementedAt" TIMESTAMP(3),

@@ -39,7 +39,7 @@ const db = vi.hoisted(() => ({
   webhookSubscription: { findMany: vi.fn() },
   webhookDelivery: { createMany: vi.fn() },
   issueClaim: { updateMany: vi.fn(), update: vi.fn() },
-  delivery: { findMany: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
+  delivery: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
   projectWorkflow: { findUnique: vi.fn() },
   project: { findFirst: vi.fn() },
   agentMistake: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), findMany: vi.fn() },
@@ -172,6 +172,7 @@ beforeEach(() => {
   // No delivery filed on the claim holder's behalf unless a test adds one.
   db.delivery.findMany.mockResolvedValue([]);
   db.delivery.findFirst.mockResolvedValue(null);
+  db.delivery.findUnique.mockImplementation(async (args: Parameters<typeof db.delivery.findFirst>[0]) => db.delivery.findFirst(args));
   db.bug.findUniqueOrThrow.mockResolvedValue({ reward: 5, reporterId: "ada" });
   db.issueClaim.updateMany.mockResolvedValue({ count: 1 });
   db.bug.update.mockResolvedValue({});
@@ -785,6 +786,117 @@ describe("acceptFix: marketing work goes Live (#M-API-5)", () => {
     expect(db.delivery.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "del_1" },
+        data: expect.objectContaining({
+          deliveryStatus: "ready_to_use",
+          verifiedPublishedAt: null,
+          verifiedByManagerId: null,
+        }),
+      }),
+    );
+  });
+
+  it("selects accepted claim's agent delivery when multiple agents share the same beneficiary", async () => {
+    // Both Agent A and Agent B worked for beneficiary 'ada'
+    // Agent B holds the accepted claim
+    db.bug.findFirst.mockResolvedValue(
+      marketingBug({
+        claims: [
+          {
+            id: "claim_a",
+            status: "released",
+            claimedAt: new Date("2026-10-19T10:00:00Z"),
+            releasedAt: new Date("2026-10-20T09:00:00Z"),
+            releaseReason: "agent",
+            agentId: "agent-a",
+            beneficiaryUserId: "ada",
+            agent: { ownerUserId: "ada", name: "agent-a" },
+          },
+          {
+            id: "claim_b",
+            status: "active",
+            claimedAt: new Date("2026-10-20T10:00:00Z"),
+            releasedAt: null,
+            agentId: "agent-b",
+            beneficiaryUserId: "ada",
+            agent: { ownerUserId: "ada", name: "agent-b" },
+          },
+        ],
+      }),
+    );
+    db.bug.findUniqueOrThrow.mockResolvedValue({ reward: 6, reporterId: "poster" });
+    verdict("r1", "rob", "rob", null, null);
+    verdict("r2", "sam", "sam", null, null);
+    verdict("r3", "tia", "tia", null, null);
+
+    const deliveryA = {
+      id: "del_a",
+      bugId: "bug1",
+      agentId: "agent-a",
+      beneficiaryUserId: "ada",
+      // Even if Agent A's delivery has a newer updatedAt timestamp!
+      updatedAt: new Date("2026-10-25T00:00:00Z"),
+      publishedUrls: ["https://example.com/a"],
+      deliveryStatus: "ready_to_use",
+      verifiedByManagerId: null,
+    };
+    const deliveryB = {
+      id: "del_b",
+      bugId: "bug1",
+      agentId: "agent-b",
+      beneficiaryUserId: "ada",
+      updatedAt: new Date("2026-10-21T00:00:00Z"),
+      publishedUrls: ["https://example.com/b"],
+      deliveryStatus: "publication_pending",
+      verifiedByManagerId: null,
+    };
+
+    db.delivery.findUnique.mockImplementation(async ({ where }: { where: { bugId_agentId?: { agentId: string } } }) => {
+      if (where.bugId_agentId?.agentId === "agent-b") return deliveryB;
+      if (where.bugId_agentId?.agentId === "agent-a") return deliveryA;
+      return null;
+    });
+
+    await acceptFix(merger("m1", "mo", "manager"), "bug1", {
+      confirmPublication: true,
+      manualOverrideReason: "Confirmed agent B live on external site",
+    });
+
+    // Only Agent B's delivery must be updated to live_published with manager attribution
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_b" },
+        data: expect.objectContaining({
+          deliveryStatus: "live_published",
+          verifiedByManagerId: "mo",
+        }),
+      }),
+    );
+
+    // Agent A's delivery was NOT updated
+    expect(db.delivery.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_a" },
+      }),
+    );
+  });
+
+  it("does not count missing confirmation as confirmation and leaves delivery as ready_to_use", async () => {
+    marketingReady();
+    db.delivery.findFirst.mockResolvedValue({
+      id: "del_unconfirmed",
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+      publishedUrls: ["https://example.com/blog"],
+      deliveryStatus: "publication_pending",
+    });
+
+    // Review body without confirmPublication (omitted / missing)
+    await acceptFix(merger("m1", "mo", "manager"), "bug1", {
+      manualOverrideReason: "Some reason",
+    });
+
+    expect(db.delivery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "del_unconfirmed" },
         data: expect.objectContaining({
           deliveryStatus: "ready_to_use",
           verifiedPublishedAt: null,
