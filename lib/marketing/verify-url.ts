@@ -156,15 +156,15 @@ export function parseIPv6(rawIp: string): number[] | null {
 }
 
 function hextetsToBigInt(hextets: number[]): bigint {
-  let val = 0n;
+  let val = BigInt(0);
   for (const h of hextets) {
-    val = (val << 16n) | BigInt(h);
+    val = (val << BigInt(16)) | BigInt(h);
   }
   return val;
 }
 
 function matchCidr(ipBigInt: bigint, baseBigInt: bigint, prefixLen: number): boolean {
-  const shift = 128n - BigInt(prefixLen);
+  const shift = BigInt(128 - prefixLen);
   return (ipBigInt >> shift) === (baseBigInt >> shift);
 }
 
@@ -178,10 +178,10 @@ export function isDisallowedIPv6(rawIp: string): boolean {
   const ipBigInt = hextetsToBigInt(hextets);
 
   // Unspecified (::/128)
-  if (matchCidr(ipBigInt, 0n, 128)) return true;
+  if (matchCidr(ipBigInt, BigInt(0), 128)) return true;
 
   // Loopback (::1/128)
-  if (matchCidr(ipBigInt, 1n, 128)) return true;
+  if (matchCidr(ipBigInt, BigInt(1), 128)) return true;
 
   // IPv4-mapped IPv6 address (::ffff:0:0/96) in dotted or hex notation
   // (e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1 or 0:0:0:0:0:ffff:7f00:0001)
@@ -209,7 +209,7 @@ export function isDisallowedIPv6(rawIp: string): boolean {
   }
 
   // NAT64 Local-Use (64:ff9b:1::/48 - RFC 8215)
-  if (matchCidr(ipBigInt, (0x0064n << 112n) | (0xff9bn << 96n) | (0x0001n << 80n), 48)) {
+  if (matchCidr(ipBigInt, (BigInt(0x0064) << BigInt(112)) | (BigInt(0xff9b) << BigInt(96)) | (BigInt(0x0001) << BigInt(80)), 48)) {
     return true;
   }
 
@@ -230,31 +230,31 @@ export function isDisallowedIPv6(rawIp: string): boolean {
   }
 
   // Unique-Local Addresses ULA (fc00::/7 - RFC 4193, covers fc00..fdff)
-  if (matchCidr(ipBigInt, 0xfc00n << 112n, 7)) return true;
+  if (matchCidr(ipBigInt, BigInt(0xfc00) << BigInt(112), 7)) return true;
 
   // Link-Local Unicast (fe80::/10 - RFC 4291, covers fe80..febf)
-  if (matchCidr(ipBigInt, 0xfe80n << 112n, 10)) return true;
+  if (matchCidr(ipBigInt, BigInt(0xfe80) << BigInt(112), 10)) return true;
 
   // Site-Local Unicast (deprecated RFC 3879) (fec0::/10)
-  if (matchCidr(ipBigInt, 0xfec0n << 112n, 10)) return true;
+  if (matchCidr(ipBigInt, BigInt(0xfec0) << BigInt(112), 10)) return true;
 
   // Multicast (ff00::/8 - RFC 4291)
-  if (matchCidr(ipBigInt, 0xff00n << 112n, 8)) return true;
+  if (matchCidr(ipBigInt, BigInt(0xff00) << BigInt(112), 8)) return true;
 
   // Discard-Only Prefix (100::/64 - RFC 6666)
-  if (matchCidr(ipBigInt, 0x0100n << 112n, 64)) return true;
+  if (matchCidr(ipBigInt, BigInt(0x0100) << BigInt(112), 64)) return true;
 
   // Documentation (2001:db8::/32 - RFC 3849)
-  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0db8n << 96n), 32)) return true;
+  if (matchCidr(ipBigInt, (BigInt(0x2001) << BigInt(112)) | (BigInt(0x0db8) << BigInt(96)), 32)) return true;
 
   // Benchmarking (2001:2::/48 - RFC 5180)
-  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0002n << 96n), 48)) return true;
+  if (matchCidr(ipBigInt, (BigInt(0x2001) << BigInt(112)) | (BigInt(0x0002) << BigInt(96)), 48)) return true;
 
   // Deprecated Direct Root Name Service (2001:10::/28)
-  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0010n << 96n), 28)) return true;
+  if (matchCidr(ipBigInt, (BigInt(0x2001) << BigInt(112)) | (BigInt(0x0010) << BigInt(96)), 28)) return true;
 
   // ORCHIDv2 (2001:20::/28 - RFC 7343)
-  if (matchCidr(ipBigInt, (0x2001n << 112n) | (0x0020n << 96n), 28)) return true;
+  if (matchCidr(ipBigInt, (BigInt(0x2001) << BigInt(112)) | (BigInt(0x0020) << BigInt(96)), 28)) return true;
 
   return false;
 }

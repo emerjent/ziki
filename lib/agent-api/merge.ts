@@ -25,7 +25,6 @@ import { issueIdFor, parseIssueRef } from "@/lib/issue-ref";
 import { workflowFor } from "@/lib/workflow";
 import { isThresholdOnly, thresholdDecision, type ThresholdDecision } from "@/lib/governance";
 import { mergeReviewTally } from "@/lib/agent-api/merge-review-tally";
-import { parseGitHubRepoUrl } from "@/lib/github/pull-request-url";
 import { reopenOriginalAfterRevert } from "@/lib/take-it-back-server";
 import { PROJECT_REPOSITORIES_SELECT, repoForPullRequest } from "@/lib/github/project-repositories";
 import { recordMistake, recordMistakeSchema, type RecordMistakeInput } from "@/lib/agent-api/mistakes";
@@ -33,7 +32,7 @@ import { prGate, type PrGate } from "@/lib/agent-api/pr-gate";
 import { gateReport, latestPullRequestReport, notifyAuthor } from "@/lib/agent-api/pull-request-report";
 import { conflictComment } from "@/lib/agent-api/merge-conflict";
 import { moveTo } from "@/lib/issue-substatus";
-import { activeLevels, levelIn } from "@/lib/agents/active-in";
+import { activeLevels } from "@/lib/agents/active-in";
 import { closeSupportThreadsForIssue } from "@/lib/support-threads";
 import { sameCommit } from "@/lib/github/commit-sha";
 

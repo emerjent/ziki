@@ -39,8 +39,14 @@ describe("Marketing Output Engine - Real Database Concurrency & Integrity", () =
       return;
     }
     try {
-      await prisma.$connect();
-      await prisma.$queryRaw`SELECT 1`;
+      const connectPromise = (async () => {
+        await prisma.$connect();
+        await prisma.$queryRaw`SELECT 1`;
+      })();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Connection timeout")), 3000),
+      );
+      await Promise.race([connectPromise, timeoutPromise]);
       dbAvailable = true;
     } catch (err) {
       dbAvailable = false;
@@ -226,6 +232,7 @@ describe("Marketing Output Engine - Real Database Concurrency & Integrity", () =
       organisationId: org.id,
       level: "working" as const,
       burst: false,
+      keyId: "test-key-id",
     };
 
     const [sub1, sub2] = await Promise.all([
@@ -270,6 +277,7 @@ describe("Marketing Output Engine - Real Database Concurrency & Integrity", () =
       organisationId: org.id,
       level: "working" as const,
       burst: false,
+      keyId: "test-key-id",
     };
 
     const [r1, r2] = await Promise.all([
@@ -323,6 +331,7 @@ describe("Marketing Output Engine - Real Database Concurrency & Integrity", () =
       organisationId: org.id,
       level: "working" as const,
       burst: false,
+      keyId: "test-key-id",
     };
 
     // Legitimate delivery with attachment
@@ -397,6 +406,7 @@ describe("Marketing Output Engine - Real Database Concurrency & Integrity", () =
       organisationId: org.id,
       level: "working" as const,
       burst: false,
+      keyId: "test-key-id-b",
     };
 
     const resB = await deliverWork(agentContextB, task.id, {
@@ -453,6 +463,7 @@ describe("Marketing Output Engine - Real Database Concurrency & Integrity", () =
       organisationId: org.id,
       level: "manager" as const,
       burst: false,
+      keyId: "test-manager-key-id",
     };
 
     const acceptRes = await acceptFix(
