@@ -270,6 +270,12 @@ describe("preview scan of a public repo (13 Nov)", () => {
     expect(result).toMatchObject({ ok: true, kind: "repo", target: "settle/app", findings: [], checked: ["secrets", "policy", "updates"], counts: { critical: 0, high: 0, medium: 0, low: 0 } });
   });
 
+  it("reads the GitHub address the chat builds from a repo's owner/name, though not the bare owner/name", async () => {
+    const net = network({ repo: KEPT_REPO });
+    expect(await scan("github.com/settle/app", net)).toMatchObject({ ok: true, kind: "repo", target: "settle/app" });
+    expect(await scan("settle/app", net)).toMatchObject({ ok: false });
+  });
+
   it("flags files that usually hold secrets as high, but not examples", async () => {
     const result = await scan("github.com/settle/app", network({ repo: { status: "ok", root: ["SECURITY.md", ".env", ".env.example", "deploy.pem", "id_rsa", "README.md"], github: [], docs: [] } }));
     expect(result).toMatchObject({ ok: true, counts: { high: 3, low: 0 } });
