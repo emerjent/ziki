@@ -10,6 +10,7 @@ import { dispatchDueDeliveries } from "@/lib/webhooks/deliver";
 import { pruneAgentRows, type AgentRetentionCounts } from "@/lib/agent-retention";
 import { sweepOrphanedAttachments } from "@/lib/attachment-retention";
 import { sweepOrphanedIssues } from "@/lib/orphaned-issues";
+import { sweepPipelineCleanup, type PipelineSweepResult } from "@/lib/pipeline-cleanup";
 import { sweepUndraftedIdeas } from "@/lib/cron/draft-structuring";
 import { processSearchOutbox, pruneProcessedSearchOutbox } from "@/lib/search-index";
 import { refreshMergeQueue } from "@/lib/github/sync";
@@ -70,6 +71,7 @@ export type PlatformSweepsResult = {
     onCall: { status: "ok" | "error"; onCall?: number; online?: number; free?: number; error?: string };
     orphanedIssues: { status: "ok" | "error"; reopened?: number; error?: string };
     testing: { status: "ok" | "error"; toOwners?: number; escalated?: number; summaries?: number; error?: string };
+    pipelineCleanup: { status: "ok" | "error"; error?: string } & Partial<PipelineSweepResult>;
     draftStructuring: {
       status: "ok" | "error";
       structured?: number;
@@ -98,6 +100,7 @@ let sweepInProgress = false;
  * - Job-review offer expiry and recovery
  * - Stale claim release (inactivity & deadline)
  * - Reopen unassigned in-progress issues without live claims or linked fixes
+ * - Close open issues that left the pipeline (rejected or duplicate for two days)
  * - Webhook dispatch (lease-guarded)
  * - Retention prunes (agent rows & orphaned attachments)
  *
@@ -124,6 +127,7 @@ export async function runPlatformSweeps(): Promise<PlatformSweepsResult | { skip
         onCall: { status: "ok" },
         orphanedIssues: { status: "ok" },
         testing: { status: "ok" },
+        pipelineCleanup: { status: "ok" },
         draftStructuring: { status: "ok" },
         githubStatus: { status: "ok" },
         previews: { status: "ok" },
@@ -239,6 +243,17 @@ export async function runPlatformSweeps(): Promise<PlatformSweepsResult | { skip
     } catch (err) {
       recordSweepFailure("orphanedIssues", err);
       result.sweeps.orphanedIssues = { status: "error", error: err instanceof Error ? err.message : String(err) };
+    }
+
+    // 2b'. Pipeline cleanup (#pipeline-cleanup): close open issues rejected or
+    // marked duplicate two days ago. Off unless PIPELINE_CLEANUP is dry_run or on.
+    try {
+      const res = await sweepPipelineCleanup();
+      recordSweepSuccess("pipelineCleanup");
+      result.sweeps.pipelineCleanup = { status: "ok", ...res };
+    } catch (err) {
+      recordSweepFailure("pipelineCleanup", err);
+      result.sweeps.pipelineCleanup = { status: "error", error: err instanceof Error ? err.message : String(err) };
     }
 
     // 2c. Draft Idea Auto-Structuring (#682, #685)

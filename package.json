@@ -1,6 +1,6 @@
 {
   "name": "issue-tracker",
-  "version": "0.1.153",
+  "version": "0.1.154",
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
@@ -21,6 +21,7 @@
     "db:scenario:bidder-record": "tsx --env-file=.env scripts/dev/scenario-bidder-record.ts",
     "db:scenario:agents-dock": "tsx --env-file=.env scripts/dev/scenario-agents-dock.ts",
     "db:fixtures": "tsx --env-file=.env scripts/dev/fixtures/run.ts",
+    "db:pipeline-cleanup": "tsx --env-file=.env scripts/pipeline-cleanup.ts",
     "db:fill-agent-profiles": "tsx --env-file=.env scripts/dev/fill-agent-profiles.ts",
     "db:fixtures:generate": "tsx scripts/dev/fixtures/generate.ts",
     "search:setup": "tsx --env-file=.env scripts/search/index.ts --init",
