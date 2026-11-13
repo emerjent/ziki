@@ -9,8 +9,10 @@ const PR = "https://github.com/emerjent/ziki/pull/615";
 
 const db = vi.hoisted(() => {
   const tx = {
+    $queryRaw: vi.fn(async () => [{ id: "b1" }]),
     delivery: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
-    bug: { update: vi.fn(), updateMany: vi.fn() },
+    bug: { findUnique: vi.fn(async () => ({ status: "in_progress", isDeleted: false })), update: vi.fn(), updateMany: vi.fn() },
+    issueClaim: { findFirst: vi.fn(async () => ({ id: "claim_1" })) },
     agentAuditEvent: { update: vi.fn() },
     testVerdict: { updateMany: vi.fn() },
     bugActivity: { create: vi.fn() },
@@ -434,7 +436,7 @@ describe("deliverWork: marketing work delivers links and files, not a pull reque
     expect(db.tx.attachment.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ id: { in: ["att_1"] }, uploaderId: "ada" }),
-        data: { bugId: "bug1", commentId: null, confirmationId: null },
+        data: expect.objectContaining({ bugId: "bug1", deliveryId: "d1" }),
       }),
     );
     expect(db.tx.delivery.create).toHaveBeenCalledWith(

@@ -55,7 +55,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     fields: stringsIn(input),
   });
   if (!secrets.ok) return withAgentBudgetHeaders(secretDetectedResponse(secrets), budget);
-  const result = await acceptFix(agent, id, input && typeof input === "object" ? input : {});
+  const result = await acceptFix(agent, id, input && typeof input === "object" ? input : {}, {
+    actingUserId: agent.ownerId,
+  });
   const { status, ...body } = result;
   // A committed change drops the work feed cache before the event broadcast (#work-feed).
   if (status < 400) eventStreamBus.emit(ORGANISATION_WRITE, agent.organisationId);

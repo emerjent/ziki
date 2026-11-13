@@ -25,7 +25,6 @@ import { issueIdFor, parseIssueRef } from "@/lib/issue-ref";
 import { workflowFor } from "@/lib/workflow";
 import { isThresholdOnly, thresholdDecision, type ThresholdDecision } from "@/lib/governance";
 import { mergeReviewTally } from "@/lib/agent-api/merge-review-tally";
-import { parseGitHubRepoUrl } from "@/lib/github/pull-request-url";
 import { reopenOriginalAfterRevert } from "@/lib/take-it-back-server";
 import { PROJECT_REPOSITORIES_SELECT, repoForPullRequest } from "@/lib/github/project-repositories";
 import { recordMistake, recordMistakeSchema, type RecordMistakeInput } from "@/lib/agent-api/mistakes";
@@ -33,7 +32,7 @@ import { prGate, type PrGate } from "@/lib/agent-api/pr-gate";
 import { gateReport, latestPullRequestReport, notifyAuthor } from "@/lib/agent-api/pull-request-report";
 import { conflictComment } from "@/lib/agent-api/merge-conflict";
 import { moveTo } from "@/lib/issue-substatus";
-import { activeLevels, levelIn } from "@/lib/agents/active-in";
+import { activeLevels } from "@/lib/agents/active-in";
 import { closeSupportThreadsForIssue } from "@/lib/support-threads";
 import { sameCommit } from "@/lib/github/commit-sha";
 
@@ -180,12 +179,24 @@ export type AcceptBlock = {
  * most two sentences and a full description. A reject may also record an
  * anti-pattern in the project's mistake registry.
  */
+export const urlManualOverrideSchema = z.object({
+  url: z.string().trim().url(),
+  reason: z.string().trim().min(5).max(1000),
+});
+
+export type UrlManualOverride = z.infer<typeof urlManualOverrideSchema>;
+
 export const mergeReviewBodySchema = z.object({
   verdict: z.enum(["accept", "reject"]),
   summary: entrySummary,
   description: entryDescription,
   mistake: recordMistakeSchema.omit({ bugId: true }).optional(),
   projectId: z.string().optional(),
+  onBehalfOfUserId: z.string().trim().min(1).max(191).optional(),
+  confirmPublication: z.boolean().optional(),
+  manualOverrideReason: z.string().trim().max(1000).optional(),
+  confirmedUrls: z.array(z.string().trim()).optional(),
+  manualOverrides: z.array(urlManualOverrideSchema).optional(),
 });
 
 export type MergeReviewInput = {
@@ -193,6 +204,11 @@ export type MergeReviewInput = {
   summary: string;
   description: string;
   mistake?: Omit<RecordMistakeInput, "bugId">;
+  onBehalfOfUserId?: string;
+  confirmPublication?: boolean;
+  manualOverrideReason?: string;
+  confirmedUrls?: string[];
+  manualOverrides?: UrlManualOverride[];
 };
 
 /** Parses a raw `POST /merge` body into a review, or the 400 naming the field. */
@@ -202,8 +218,21 @@ export function parseMergeReview(
   const body = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const parsed = mergeReviewBodySchema.safeParse(body);
   if (parsed.success) {
-    const { verdict, summary, description, mistake } = parsed.data;
-    return { ok: true, review: { verdict, summary, description, ...(mistake ? { mistake } : {}) } };
+    const { verdict, summary, description, mistake, onBehalfOfUserId, confirmPublication, manualOverrideReason, confirmedUrls, manualOverrides } = parsed.data;
+    return {
+      ok: true,
+      review: {
+        verdict,
+        summary,
+        description,
+        ...(mistake ? { mistake } : {}),
+        ...(onBehalfOfUserId ? { onBehalfOfUserId } : {}),
+        ...(confirmPublication !== undefined ? { confirmPublication } : {}),
+        ...(manualOverrideReason ? { manualOverrideReason } : {}),
+        ...(confirmedUrls ? { confirmedUrls } : {}),
+        ...(manualOverrides ? { manualOverrides } : {}),
+      },
+    };
   }
   const issue = parsed.error.issues[0];
   const field = typeof issue?.path[0] === "string" ? issue.path[0] : undefined;
@@ -238,12 +267,13 @@ async function saveMergeReview(
   review: MergeReviewInput,
   pullRequestUrl: string | null,
   headSha: string | null,
+  managerUserId: string = agent.ownerId,
 ): Promise<{ review: StoredMergeReview; replaced: boolean }> {
   const data = {
     verdict: review.verdict,
     summary: review.summary,
     description: review.description,
-    onBehalfOfUserId: agent.ownerId,
+    onBehalfOfUserId: managerUserId,
     pullRequestUrl,
     headSha,
   };
@@ -259,6 +289,11 @@ async function saveMergeReview(
   return { review: saved, replaced: Boolean(existing) };
 }
 
+export type MergeAuthContext = {
+  /** The conclusively authenticated acting user ID from session/token verification */
+  actingUserId?: string | null;
+};
+
 /**
  * `POST /issues/{id}/merge`: a merge review, accept or reject. The body must
  * carry a summary and a description (400 otherwise). In a manager-governed
@@ -272,16 +307,18 @@ export async function acceptFix(
   agent: AgentContext,
   issueRef: string,
   rawBody: unknown = {},
+  authContext?: MergeAuthContext,
 ): Promise<AcceptFixResult> {
   const parsed = parseMergeReview(rawBody);
   if (!parsed.ok) return parsed.error;
-  return reviewFix(agent, issueRef, parsed.review);
+  return reviewFix(agent, issueRef, parsed.review, authContext);
 }
 
 async function reviewFix(
   agent: AgentContext,
   issueRef: string,
   review: MergeReviewInput,
+  authContext?: MergeAuthContext,
 ): Promise<AcceptFixResult> {
   // #457: the path may be the readable number (`123`, `ZE-123`) or the id.
   const bugId = await issueIdFor(prisma, issueRef, agent.organisationId);
@@ -309,6 +346,55 @@ async function reviewFix(
     return { status: 403, error: "insufficient_level", message: "Only manager or merger agents can accept a fix." };
   }
 
+  // Derive the acting user's identity from authenticated context or trusted key owner.
+  // Do not trust an arbitrary user ID supplied in the request body as proof of identity.
+  const authenticatedUserId = authContext?.actingUserId !== undefined
+    ? authContext.actingUserId
+    : (agent.ownerId || null);
+
+  if (!authenticatedUserId) {
+    return {
+      status: 403,
+      error: "insufficient_level",
+      message: "Authenticated manager identity could not be established.",
+    };
+  }
+
+  // Reject spoofed user IDs supplied in the request body
+  if (review.onBehalfOfUserId && review.onBehalfOfUserId !== authenticatedUserId) {
+    return {
+      status: 403,
+      error: "not_independent",
+      message: "Spoofed user ID: onBehalfOfUserId does not match the authenticated user.",
+    };
+  }
+
+  const membership = await prisma.membership.findFirst({
+    where: { organisationId: agent.organisationId, userId: authenticatedUserId, organisation: { archivedAt: null } },
+    select: { id: true, role: true },
+  });
+  if (!membership) {
+    return {
+      status: 403,
+      error: "not_independent",
+      message: "The authenticated manager does not belong to this organisation.",
+    };
+  }
+
+  const isAuthorizedManager =
+    membership.role === "admin" ||
+    membership.role === "owner" ||
+    hasLevel(agent.level, "manager");
+  if (!isAuthorizedManager) {
+    return {
+      status: 403,
+      error: "insufficient_level",
+      message: "The authenticated user is not authorised to approve deliveries in this organisation.",
+    };
+  }
+
+  const managerUserId = authenticatedUserId;
+
   // #493: the merger is an independent reviewer too. The same rule that keeps
   // a claim holder's side out of the verdicts keeps it out of the review —
   // otherwise an owner could accept their own fix and collect the solver
@@ -316,6 +402,12 @@ async function reviewFix(
   const conflict = reviewerConflict({ id: agent.agentId, ownerUserId: agent.ownerId }, bug);
   if (conflict) {
     return { status: 403, error: "not_independent", message: new ReviewerNotIndependentError(conflict).message };
+  }
+  if (managerUserId !== agent.ownerId) {
+    const managerConflict = reviewerConflict({ id: agent.agentId, ownerUserId: managerUserId }, bug);
+    if (managerConflict) {
+      return { status: 403, error: "not_independent", message: new ReviewerNotIndependentError(managerConflict).message };
+    }
   }
 
   if (marketing && bug.substatus !== "accepted") {
@@ -327,7 +419,7 @@ async function reviewFix(
     };
   }
 
-  if (review.verdict === "reject") return rejectFix(agent, bug, review, voting);
+  if (review.verdict === "reject") return rejectFix(agent, bug, review, voting, managerUserId);
 
   if (bug.status === "resolved") {
     return {
@@ -394,8 +486,8 @@ async function reviewFix(
         };
       }
       // Marketing work has no pull request, so its review names neither one nor a head commit.
-      const saved = await saveMergeReview(tx, agent, bug, review, null, null);
-      return acceptMarketing(tx, agent, bug, claim, solverUserId, reviewers, saved);
+      const saved = await saveMergeReview(tx, agent, bug, review, null, null, managerUserId);
+      return acceptMarketing(tx, agent, bug, claim, solverUserId, reviewers, saved, review, managerUserId);
     });
   }
 
@@ -480,7 +572,7 @@ async function reviewFix(
 
   return prisma.$transaction(async (tx) => {
     // The accept: ready to merge, without resolving or awarding points.
-    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, headSha);
+    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, headSha, managerUserId);
     // Threshold-only: the accept is a vote; only the one that reaches acceptThreshold moves the issue.
     let decision: ThresholdDecision | null = null;
     if (voting) {
@@ -499,7 +591,7 @@ async function reviewFix(
     await tx.bugActivity.create({
       data: {
         bugId: bug.id,
-        actorId: agent.ownerId,
+        actorId: managerUserId,
         type: "status_changed",
         summary: decision ? "Fix accepted by agents' merge reviews and marked ready to merge" : "Fix accepted by a manager agent and marked ready to merge",
         metadata: { field: "status", readyToMerge: true, headSha, mergeReviewId: saved.review.id, pullRequestReportId: report?.id ?? null, ...(decision ?? {}) },
@@ -754,14 +846,121 @@ async function acceptMarketing(
   solverUserId: string | null,
   rewardedReviewerUserIds: readonly string[],
   saved: { review: StoredMergeReview; replaced: boolean },
+  review?: MergeReviewInput,
+  managerUserId: string = agent.ownerId,
 ): Promise<AcceptFixResult> {
   const moved = moveTo(trackRules(bug.track).acceptMovesTo);
   await tx.bug.update({ where: { id: bug.id }, data: moved });
   await closeSupportThreadsForIssue(tx, { bugId: bug.id, reason: "fix_live" });
+
+  // Identify the actual accepted claim and its agent ID (#marketing-engine)
+  const acceptedClaim =
+    claim ??
+    bug.claims.find((c) => c.status === "active" && !c.releasedAt) ??
+    (await tx.issueClaim.findFirst({
+      where: { bugId: bug.id, status: "active", releasedAt: null },
+      select: { agentId: true, beneficiaryUserId: true },
+    })) ??
+    (await tx.issueClaim.findFirst({
+      where: { bugId: bug.id, status: "released", releaseReason: "accepted" },
+      orderBy: [{ releasedAt: "desc" }, { id: "desc" }],
+      select: { agentId: true, beneficiaryUserId: true },
+    })) ??
+    bug.claims.find((c) => c.status === "released" && (c as { releaseReason?: string }).releaseReason === "accepted") ??
+    bug.claims.find((c) => c.status === "released");
+
+  const acceptedAgentId = acceptedClaim?.agentId;
+
+  // Select the delivery belonging to that accepted agent; never use latest updatedAt as deciding factor
+  const delivery = acceptedAgentId
+    ? await tx.delivery.findUnique({
+        where: { bugId_agentId: { bugId: bug.id, agentId: acceptedAgentId } },
+      })
+    : await tx.delivery.findFirst({
+        where: {
+          bugId: bug.id,
+          ...(solverUserId ? { beneficiaryUserId: solverUserId } : {}),
+        },
+        orderBy: [{ id: "desc" }],
+      });
+
+  if (delivery) {
+    const publishedUrls = delivery.publishedUrls ?? [];
+    // Explicit manager confirmation is required; missing or false confirmation never counts as confirmed
+    const confirmPub = review?.confirmPublication === true;
+    let policyPassed = false;
+    const manualOverridesRecorded: Array<{ url: string; reason: string }> = [];
+
+    if (confirmPub) {
+      if (publishedUrls.length > 0) {
+        const existingEvidence = delivery.verificationEvidence as {
+          results?: Array<{ url: string; ok: boolean; status?: number | null; error?: string }>;
+          [key: string]: unknown;
+        } | null;
+
+        const probeResults = existingEvidence?.results ?? [];
+        const manualOverrides = review?.manualOverrides ?? [];
+        const generalOverrideReason = review?.manualOverrideReason?.trim();
+
+        let allUrlsSatisfied = true;
+        for (const url of publishedUrls) {
+          const probe = probeResults.find((p) => p.url === url);
+          const hasPassedProbe = probe?.ok === true;
+
+          const specificOverride = manualOverrides.find((o) => o.url === url && o.reason.trim().length >= 5);
+          const hasValidOverride = Boolean(specificOverride) || (Boolean(generalOverrideReason) && generalOverrideReason!.length >= 5);
+
+          if (!hasPassedProbe && !hasValidOverride) {
+            allUrlsSatisfied = false;
+            break;
+          }
+
+          if (!hasPassedProbe && (specificOverride || generalOverrideReason)) {
+            manualOverridesRecorded.push({
+              url,
+              reason: specificOverride?.reason.trim() ?? generalOverrideReason!,
+            });
+          }
+        }
+
+        policyPassed = allUrlsSatisfied;
+      } else {
+        policyPassed = true;
+      }
+    }
+
+    const nextStatus = policyPassed ? "live_published" : "ready_to_use";
+    const verifiedPublishedAt = policyPassed ? new Date() : null;
+    const verifiedByManagerId = policyPassed ? managerUserId : null;
+    const manualOverrideReason = manualOverridesRecorded.length > 0
+      ? manualOverridesRecorded.map((o) => `${o.url}: ${o.reason}`).join("; ")
+      : review?.manualOverrideReason?.trim() || null;
+
+    const updatedEvidence = {
+      ...(typeof delivery.verificationEvidence === "object" && delivery.verificationEvidence !== null
+        ? (delivery.verificationEvidence as Record<string, unknown>)
+        : {}),
+      policyPassed,
+      confirmedAt: new Date().toISOString(),
+      confirmedByUserId: managerUserId,
+      overrides: manualOverridesRecorded,
+    };
+
+    await tx.delivery.update({
+      where: { id: delivery.id },
+      data: {
+        deliveryStatus: nextStatus,
+        verifiedPublishedAt,
+        verifiedByManagerId,
+        manualOverrideReason,
+        verificationEvidence: updatedEvidence,
+      },
+    });
+  }
   await tx.bugActivity.create({
     data: {
       bugId: bug.id,
-      actorId: agent.ownerId,
+      actorId: managerUserId,
       type: "status_changed",
       summary: "Marketing work accepted by a manager agent and published",
       metadata: {
@@ -771,6 +970,7 @@ async function acceptMarketing(
         published: true,
         mergeReviewId: saved.review.id,
         solverUserId,
+        managerUserId,
         rewardedReviewerUserIds: [...rewardedReviewerUserIds],
       },
     },
@@ -1017,7 +1217,13 @@ async function recordReviewVote(
  * threshold-only project (`voting`) the reject is a vote: the issue goes back
  * only once the weighted rejects reach the threshold.
  */
-async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeReviewInput, voting: Voting | null): Promise<AcceptFixResult> {
+async function rejectFix(
+  agent: AgentContext,
+  bug: LoadedBug,
+  review: MergeReviewInput,
+  voting: Voting | null,
+  managerUserId: string = agent.ownerId,
+): Promise<AcceptFixResult> {
   // The mistake registry is a manager's (lib/agent-api/mistakes.ts), in either governance mode.
   if (review.mistake && !hasLevel(agent.level, "manager")) {
     return { status: 403, error: "insufficient_level", message: "Only manager or merger agents record mistakes. Send the reject without mistake." };
@@ -1063,7 +1269,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
         };
       }
 
-      const saved = await saveMergeReview(tx, agent, current, review, pullRequestUrl, current.pullRequestHeadSha ?? null);
+      const saved = await saveMergeReview(tx, agent, current, review, pullRequestUrl, current.pullRequestHeadSha ?? null, managerUserId);
       if (review.mistake) {
         await recordMistake(agent, current.projectId, { ...review.mistake, bugId: current.id }, tx);
       }
@@ -1096,7 +1302,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
       await tx.bugActivity.create({
         data: {
           bugId: current.id,
-          actorId: agent.ownerId,
+          actorId: managerUserId,
           type: "status_changed",
           summary: sendBack.keepsClaim
             ? `Work rejected by manager: ${review.summary} (revision round ${sendBack.revisionCount} of ${workflow.revisionLimit})`
@@ -1148,7 +1354,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
       return { status: 200, accepted: false, review: saved.review, replaced: saved.replaced, rejected: true };
     }
 
-    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, bug.pullRequestHeadSha ?? null);
+    const saved = await saveMergeReview(tx, agent, bug, review, pullRequestUrl, bug.pullRequestHeadSha ?? null, managerUserId);
     if (review.mistake) {
       await recordMistake(agent, bug.projectId, { ...review.mistake, bugId: bug.id }, tx);
     }
@@ -1165,7 +1371,7 @@ async function rejectFix(agent: AgentContext, bug: LoadedBug, review: MergeRevie
     await tx.bugActivity.create({
       data: {
         bugId: bug.id,
-        actorId: agent.ownerId,
+        actorId: managerUserId,
         type: "status_changed",
         summary: `Fix rejected for merging: ${review.summary}`,
         metadata: { field: "status", from: bug.substatus, to: "in_progress", rejected: true, mergeReviewId: saved.review.id, ...(decision ?? {}) },

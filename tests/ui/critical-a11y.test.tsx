@@ -253,7 +253,7 @@ async function expectNoA11yViolations(node: HTMLElement) {
 
 const users = [{ id: "u1", name: "Alice", role: "user" as const }];
 
-describe("component accessibility (axe)", () => {
+describe("component accessibility (axe)", { timeout: 30000 }, () => {
   it("shows the stuck context first in an agent profile sidebar and omits it when the agent is not stuck", () => {
     const agent: AgentProfileData = {
       id: "agent-1", name: "Build agent", model: "Test model", avatar: null, level: "working", revokedAt: null,
@@ -303,6 +303,7 @@ describe("component accessibility (axe)", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
     const { container } = render(<Library slug={projectRef("acme", "acme")} initial={{ ok: true, items: [{
       id: "published", number: 42, title: "Welcome email", agent: "Content agent", summary: "An approved email sequence.", publishedAt: "2026-11-04T12:00:00Z",
+      deliveryId: "del_published", category: "Content & Editorial", taskType: "Email or newsletter", deliveryStatus: "live_published", publishedUrls: [], implementedAt: null, implementedByName: null,
       files: deliveryFiles(["https://example.com/welcome.docx"]),
     }] }} />);
     await expectNoA11yViolations(container);

@@ -13,11 +13,14 @@ export type MarketingDeliveryView = {
   description: string;
   deliverableText?: string | null;
   deliverableUrls?: string[];
+  publishedUrls?: string[];
+  deliveryStatus?: string;
   screenshots?: string[];
   testResults?: string | null;
   current: boolean;
   updatedAt: Date | string;
   replies: EntryReplyView[];
+  attachments?: Array<{ id: string; filename: string; contentType: string; size: number }>;
 };
 
 function formatDomain(rawUrl: string): string {
@@ -110,8 +113,8 @@ export function MarketingDeliverablesPanel({
                   </div>
                 </div>
 
-                {/* The delivered work and its links */}
-                {urls.length > 0 || delivery.deliverableText ? (
+                {/* The delivered work, links and files */}
+                {urls.length > 0 || delivery.deliverableText || (delivery.attachments && delivery.attachments.length > 0) ? (
                   <div className="flex flex-col gap-1.5">
                     <span className="text-xs font-bold uppercase tracking-wider text-zk-muted">
                       Delivered Links & Work
@@ -131,6 +134,67 @@ export function MarketingDeliverablesPanel({
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-800 dark:bg-teal-900/50 dark:text-teal-200">
                               {formatDomain(url)}
+                            </span>
+                            <span className="truncate text-zk-text group-hover:text-zk-accent">
+                              {url}
+                            </span>
+                          </div>
+                          <span className="text-zk-muted group-hover:text-zk-accent">↗</span>
+                        </a>
+                      ))}
+                      {delivery.attachments?.map((file) => (
+                        <a
+                          key={file.id}
+                          href={`/api/attachments/${file.id}`}
+                          download={file.filename}
+                          className="group flex items-center justify-between gap-2 rounded-lg border border-zk-divider bg-zk-surface p-2.5 text-xs font-medium text-zk-text transition hover:border-teal-500 hover:bg-teal-50/50 dark:hover:bg-teal-950/20"
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-800 dark:bg-teal-900/50 dark:text-teal-200">
+                              FILE
+                            </span>
+                            <span className="truncate text-zk-text group-hover:text-zk-accent">
+                              {file.filename}
+                            </span>
+                          </div>
+                          <span className="text-zk-muted group-hover:text-zk-accent">↓</span>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Candidate / Live Published URLs */}
+                {delivery.publishedUrls && delivery.publishedUrls.length > 0 ? (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase tracking-wider text-zk-muted">
+                        Published URLs
+                      </span>
+                      {delivery.deliveryStatus ? (
+                        <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-800 dark:bg-teal-900/50 dark:text-teal-200">
+                          {delivery.deliveryStatus === "live_published"
+                            ? "Live · Published"
+                            : delivery.deliveryStatus === "implemented"
+                              ? "Implemented"
+                              : delivery.deliveryStatus === "publication_pending"
+                                ? "Verification Pending"
+                                : "Ready to Use"}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {delivery.publishedUrls.map((url, i) => (
+                        <a
+                          key={i}
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="group flex items-center justify-between gap-2 rounded-lg border border-zk-divider bg-zk-surface p-2.5 text-xs font-medium text-zk-text transition hover:border-teal-500 hover:bg-teal-50/50 dark:hover:bg-teal-950/20"
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-800 dark:bg-teal-900/50 dark:text-teal-200">
+                              WEB
                             </span>
                             <span className="truncate text-zk-text group-hover:text-zk-accent">
                               {url}
