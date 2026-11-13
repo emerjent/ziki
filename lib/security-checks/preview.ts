@@ -5,6 +5,8 @@ import https from "node:https";
 import tls from "node:tls";
 import { getDomain } from "tldts";
 import type { SecuritySeverity, SecurityTargetKind } from "@prisma/client";
+import { GitHubError, githubApiUrl, githubClientFor, installationIdForRepo } from "@/lib/github/client";
+import { logger } from "@/lib/logger";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { PREVIEW_SCANS_PER_VISITOR_PER_HOUR } from "@/lib/security-checks";
 import { isPublicAddress, PrivateAddressError, publicOnlyLookup, realNetwork } from "@/lib/security-checks/ownership";
@@ -89,7 +91,7 @@ export type PreviewNetwork = {
 export type RepoAnswer =
   | { status: "ok"; root: string[]; github: string[]; docs: string[] }
   | { status: "not_found" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; /** Why GitHub couldn't be read, in a few words, for the person and the logs. */ detail?: string };
 
 /* ------------------------------------------------------------------ */
 /* The scan                                                            */
@@ -97,6 +99,7 @@ export type RepoAnswer =
 
 const REPO_NOT_FOUND = "We couldn't see that repo on GitHub. It may be private or the name may be wrong. You can still show it's yours and agents will check it properly.";
 const REPO_UNAVAILABLE = "We couldn't read that repo from GitHub just now. Try again in a little while.";
+const unavailableReason = (detail?: string) => (detail ? `We couldn't read that repo from GitHub just now (${detail}). Try again in a little while.` : REPO_UNAVAILABLE);
 const LIMIT_REASON = "You've run a few previews already. Try again in a little while, or sign up to check your site properly.";
 const NOT_PUBLIC = "That address points inside a private network, so Ziki won't look at it.";
 
@@ -233,7 +236,7 @@ async function scanRepo(value: string, network: PreviewNetwork, now: number): Pr
   const [owner, name] = value.split("/");
   const answer = await network.repo(owner, name);
   if (answer.status === "not_found") return { ok: false, reason: REPO_NOT_FOUND };
-  if (answer.status === "unavailable") return { ok: false, reason: REPO_UNAVAILABLE };
+  if (answer.status === "unavailable") return { ok: false, reason: unavailableReason(answer.detail) };
 
   const findings: PreviewFinding[] = [];
   const checked: PreviewArea[] = ["secrets", "policy"];
@@ -558,29 +561,54 @@ const USER_AGENT = "ZikiSecurityPreview/1.0 (+https://ziki.dev/security)";
 
 export const realPreviewNetwork: PreviewNetwork = {
   async repo(owner, name) {
-    // One fixed host. The owner and name were already checked to be plain GitHub names.
-    const headers: Record<string, string> = { "User-Agent": USER_AGENT, Accept: "application/vnd.github+json" };
-    const token = process.env.GITHUB_TOKEN?.trim();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const names = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
+    // Public data only. Ziki's GitHub App is used when it covers the repo (its limit is the highest), else Ziki's token, else none.
+    const installationId = await installationIdForRepo(owner, name).catch(() => null);
+    const github = await githubClientFor({ githubInstallationId: installationId });
+    let detail = "";
+    const namesIn = (body: unknown): string[] =>
+      Array.isArray(body) ? body.flatMap((entry) => (typeof (entry as { name?: unknown })?.name === "string" ? [(entry as { name: string }).name] : [])) : [];
+    const viaClient = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
       try {
-        const response = await fetch(`https://api.github.com/repos/${owner}/${name}/contents${path}`, { headers, signal: AbortSignal.timeout(TIMEOUT_MS), cache: "no-store" });
-        if (response.status === 404) return "not_found";
-        if (!response.ok) return "unavailable";
-        const body: unknown = await response.json();
-        return Array.isArray(body) ? body.flatMap((entry) => (typeof (entry as { name?: unknown })?.name === "string" ? [(entry as { name: string }).name] : [])) : [];
-      } catch {
+        const body = await github.getOrNull<unknown>(`/repos/${owner}/${name}/contents${path}`);
+        return body === null ? "not_found" : namesIn(body);
+      } catch (error) {
+        detail = error instanceof GitHubError && error.status ? `GitHub answered ${error.status}` : "Ziki couldn't reach GitHub";
+        logger.warn(`[security-preview] couldn't read ${owner}/${name}${path} from GitHub (${github.auth}): ${detail}`, error instanceof Error ? error.message : error);
         return "unavailable";
       }
     };
+    // A token GitHub rejects, or a spent limit on it, shouldn't stop a look at a public repo: ask once with no token at all.
+    const anonymously = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
+      try {
+        const response = await fetch(`${githubApiUrl()}/repos/${owner}/${name}/contents${path}`, {
+          headers: { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT },
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+          cache: "no-store",
+        });
+        if (response.status === 404) return "not_found";
+        if (!response.ok) {
+          detail ||= `GitHub answered ${response.status}`;
+          return "unavailable";
+        }
+        return namesIn(await response.json());
+      } catch {
+        detail ||= "Ziki couldn't reach GitHub";
+        return "unavailable";
+      }
+    };
+    const names = async (path: string): Promise<string[] | "not_found" | "unavailable"> => {
+      const first = await viaClient(path);
+      return first === "unavailable" && github.auth !== "none" ? anonymously(path) : first;
+    };
     const root = await names("");
-    if (root === "not_found" || root === "unavailable") return { status: root };
+    if (root === "not_found") return { status: "not_found" };
+    if (root === "unavailable") return { status: "unavailable", detail };
     // A policy can sit in .github or docs; the update bot's setup sits in .github. A folder that can't be read counts as empty.
-    const [github, docs] = await Promise.all([
+    const [dotGithub, docs] = await Promise.all([
       root.includes(".github") ? names("/.github") : Promise.resolve([] as string[]),
       root.includes("docs") ? names("/docs") : Promise.resolve([] as string[]),
     ]);
-    return { status: "ok", root, github: Array.isArray(github) ? github : [], docs: Array.isArray(docs) ? docs : [] };
+    return { status: "ok", root, github: Array.isArray(dotGithub) ? dotGithub : [], docs: Array.isArray(docs) ? docs : [] };
   },
   async page(url) {
     const target = new URL(url);
