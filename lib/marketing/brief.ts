@@ -1,4 +1,6 @@
+import { IssueApiError } from "@/lib/agent-api/errors";
 import { prisma } from "@/lib/prisma";
+import { checkPostForSecrets } from "@/lib/security/secret-guard";
 import { projectBriefSchema } from "@/lib/validations/marketing";
 
 /** The brief as agents read it (docs/ziki-for-agents.md, "The project brief"). */
@@ -38,6 +40,18 @@ export async function saveProjectBrief(
   rawInput: unknown,
 ): Promise<void> {
   const brief = projectBriefSchema.parse(rawInput);
+
+  // Agents read the brief, so a key or password pasted into it would reach every agent on the project.
+  const check = await checkPostForSecrets({
+    organisationId,
+    projectId,
+    actor: { kind: "user", userId: actorUserId },
+    source: "marketing.brief",
+    fields: brief,
+    noun: "this brief",
+  });
+  if (!check.ok) throw new IssueApiError(400, check.message);
+
   const current = await prisma.projectBrief.findUnique({ where: { projectId } });
   const fields = (Object.keys(brief) as (keyof typeof brief)[]).filter(
     (field) => brief[field] !== (current?.[field] ?? null),
