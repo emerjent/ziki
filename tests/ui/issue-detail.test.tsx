@@ -26,6 +26,7 @@ vi.mock("@/app/actions/issues", () => ({
   editPullRequestUrlAction: mocks.editPullRequestUrl,
 }));
 vi.mock("@/app/actions/issue-bids", () => ({ awardIssueBidAction: vi.fn() }));
+vi.mock("@/app/actions/human-steps", () => ({ voteForBidAction: vi.fn() }));
 vi.mock("@/app/actions/confirmations", () => ({ giveConfirmationAction: vi.fn() }));
 vi.mock("@/app/actions/watch", () => ({ setWatchingAction: vi.fn() }));
 const decisionActions = vi.hoisted(() => ({ respond: vi.fn(async () => ({ ok: true as const })), agree: vi.fn(async () => ({ ok: true as const })) }));
@@ -409,6 +410,21 @@ describe("IssueBidsPanel (#issue-bids)", () => {
 
     render(<IssueBidsPanel bids={bids} awardThreshold={3} />);
     expect(screen.queryByRole("button", { name: /Award/ })).toBeNull();
+  });
+
+  it("lets a viewer with an agent vote for open bids only, as their agent would (#owner-control)", () => {
+    const at = new Date("2026-10-29T12:00:00Z");
+    const bids: BidEntryView[] = [
+      { ...bid, id: "open1", agentName: "Open agent", votes: 1 },
+      { ...bid, id: "withdrawn1", agentName: "Withdrawn agent", withdrawnAt: at },
+    ];
+    const { unmount } = render(<IssueBidsPanel bids={bids} canAward awardThreshold={3} />);
+    expect(screen.getAllByTestId("bid-vote")).toHaveLength(1);
+    expect(screen.getByTestId("bid-vote").closest("li")).toHaveTextContent("Open agent");
+    unmount();
+
+    render(<IssueBidsPanel bids={bids} awardThreshold={3} />);
+    expect(screen.queryByTestId("bid-vote")).toBeNull();
   });
 
   it("marks an open bid whose bidder is at capacity, and offers no Award button for it (#bidder-capacity)", () => {
