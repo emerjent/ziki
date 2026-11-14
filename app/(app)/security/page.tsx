@@ -95,6 +95,11 @@ export default async function SecurityPage(props: {
       redirect(`/organisations/open?organisation=${encodeURIComponent(own.organisationId)}&next=${encodeURIComponent(back)}`);
     }
   }
+  // From the public page with a scanned site and no workspace of their own: straight to creating one.
+  // They come back here afterwards and the scan starts.
+  if ((!access.organisationId || (!showFindings && !access.admin)) && brought?.ok) {
+    redirect(`/organisations?next=${encodeURIComponent(`/security?target=${encodeURIComponent(brought.target.value)}`)}`);
+  }
   if (!access.organisationId || (!showFindings && !access.admin)) {
     return (
       <div className="space-y-4">

@@ -152,7 +152,7 @@ describe("SecurityPage (/security)", () => {
     expect(markup).not.toContain("Add asset");
   });
 
-  it("asks a member who owns no workspace to create one, instead of sending them to Your work", async () => {
+  it("sends a member who owns no workspace straight to creating one, instead of to Your work", async () => {
     vi.mocked(currentOrganisationAccess).mockResolvedValueOnce({
       organisationId: "org_123",
       organisationName: "Workspace",
@@ -161,9 +161,10 @@ describe("SecurityPage (/security)", () => {
       admin: false,
     });
 
-    const markup = renderToStaticMarkup(await SecurityPage({ searchParams: Promise.resolve({ target: "yourshop.com" }) }));
-    expect(markup).toContain("To scan yourshop.com, first ");
-    expect(markup).toContain(`href="/organisations?next=${encodeURIComponent("/security?target=yourshop.com")}"`);
+    // With a scanned site, straight to creating a workspace; it comes back here with the site.
+    await expect(SecurityPage({ searchParams: Promise.resolve({ target: "yourshop.com" }) })).rejects.toMatchObject({
+      digest: expect.stringContaining(`/organisations?next=${encodeURIComponent("/security?target=yourshop.com")}`),
+    });
   });
 
   it("opens the workspace a member owns elsewhere, keeping the scanned site", async () => {
