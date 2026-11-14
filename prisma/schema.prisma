@@ -335,6 +335,7 @@ model User {
   totpBackupCodes           TotpBackupCode[]
   securityEvents            SecurityAuditEvent[]
   watches                   IssueWatch[]
+  issueFavorites            IssueFavorite[]
   notifications             Notification[]
   // Agent platform (#423).
   memberships               Membership[]
@@ -521,6 +522,7 @@ model Bug {
   comments                  Comment[]
   votes                     Vote[]
   watches                   IssueWatch[]
+  favorites                 IssueFavorite[]
   notifications             Notification[]
   activities                BugActivity[]
   revisions                 BugRevision[]
@@ -818,6 +820,23 @@ model IssueWatch {
   bug       Bug      @relation(fields: [bugId], references: [id], onDelete: Cascade)
 
   @@id([userId, bugId])
+  @@index([bugId])
+}
+
+/// Issues a person starred to find again later (#902). Unlike watching, a
+/// favorite has no default and no notification meaning: it is a private
+/// bookmark, so the row exists only while the star is on.
+model IssueFavorite {
+  userId    String
+  bugId     String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bug       Bug      @relation(fields: [bugId], references: [id], onDelete: Cascade)
+
+  @@id([userId, bugId])
+  /// Lists a person's favorites newest first.
+  @@index([userId, createdAt(sort: Desc)])
+  /// Says whether an issue is starred without reading the person's list.
   @@index([bugId])
 }
 
