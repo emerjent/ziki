@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewRisk, summarisePreview } from "./preview-summary";
+import { previewRisk, previewRows, summarisePreview } from "./preview-summary";
 
 describe("summarisePreview (#security-checks)", () => {
   const result = {
@@ -53,5 +53,49 @@ describe("summarisePreview (#security-checks)", () => {
     expect(previewRisk({ critical: 1, high: 0, medium: 0, low: 0 })).toBe("critical");
     expect(previewRisk({ critical: 0, high: 0, medium: 0, low: 2 })).toBe("low");
     expect(previewRisk({ critical: 0, high: 0, medium: 0, low: 0 })).toBe("minimal");
+  });
+});
+
+describe("quick-scan findings as locked rows (14 Nov plan, D3)", () => {
+  const findings = [
+    { id: "cookie-no-samesite", severity: "low" as const, area: "cookies" as const, title: "SECRET-TITLE-LOW", detail: "SECRET-DETAIL-LOW" },
+    { id: "missing-hsts", severity: "high" as const, area: "headers" as const, title: "SECRET-TITLE-HIGH", detail: "SECRET-DETAIL-HIGH" },
+    { id: "missing-dmarc", severity: "medium" as const, area: "email" as const, title: "SECRET-TITLE-MEDIUM", detail: "SECRET-DETAIL-MEDIUM" },
+    { id: "certificate-expired", severity: "critical" as const, area: "certificate" as const, title: "SECRET-TITLE-CRITICAL", detail: "SECRET-DETAIL-CRITICAL" },
+  ];
+
+  it("lists every finding worst first with its area and price (critical 5, high 3, medium 2, low 1)", () => {
+    expect(previewRows(findings)).toEqual([
+      { severity: "critical", area: "certificate", price: 5 },
+      { severity: "high", area: "headers", price: 3 },
+      { severity: "medium", area: "email", price: 2 },
+      { severity: "low", area: "cookies", price: 1 },
+    ]);
+  });
+
+  it("puts the rows in the summary the page gets, labelled, with no title, detail or finding id", () => {
+    const summary = summarisePreview({
+      ok: true,
+      kind: "website",
+      target: "settle.ng",
+      checkedAt: "2026-11-14T10:00:00.000Z",
+      checked: ["https", "certificate", "headers", "cookies", "email"],
+      counts: { critical: 1, high: 1, medium: 1, low: 1 },
+      findings,
+    });
+    expect(summary.rows).toEqual([
+      { severity: "critical", area: "certificate", label: "Certificate", price: 5 },
+      { severity: "high", area: "headers", label: "Security headers", price: 3 },
+      { severity: "medium", area: "email", label: "Email settings", price: 2 },
+      { severity: "low", area: "cookies", label: "Cookies", price: 1 },
+    ]);
+    const sent = JSON.stringify(summary);
+    expect(sent).not.toMatch(/SECRET-/);
+    // A finding's id names the problem ("missing-hsts"), so it never leaves the server either.
+    for (const finding of findings) expect(sent).not.toContain(finding.id);
+  });
+
+  it("gives no rows when nothing was found", () => {
+    expect(previewRows([])).toEqual([]);
   });
 });

@@ -22,7 +22,6 @@ import { deliverableText, marketingDeliveryBodySchema } from "@/lib/validations/
 import { linkAttachments } from "@/lib/attachment-link";
 import { MAX_ATTACHMENTS_PER_ITEM } from "@/lib/attachments";
 import { deliveryReceiptSchema, storedReceipt, type DeliveryReceipt } from "@/lib/delivery-receipt";
-import { endGuestStay } from "@/lib/on-call-guests";
 
 /**
  * Work delivered (#delivered-step): the In progress step's entry. The agent
@@ -210,6 +209,7 @@ export async function deliverWork(
       track: true,
       status: true,
       substatus: true,
+      outsideWork: { select: { agentId: true } },
       pullRequestUrl: true,
       project: { select: { repoUrl: true, ...PROJECT_REPOSITORIES_SELECT } },
     },
@@ -263,7 +263,18 @@ export async function deliverWork(
   let beneficiaryUserId = claim?.beneficiaryUserId ?? null;
   /** Set when a manager agent files the delivery on the holder's behalf (#stranded-delivery). */
   let onBehalfOf = false;
-  if (!claim) {
+  let outsideResubmission = false;
+  if (!claim && bug.outsideWork?.agentId === agent.agentId) {
+    // A manager may send an imported open PR back to In progress. Its original
+    // contributor can revise that delivery without inventing a claim, provided
+    // no other agent has since taken the work through the ordinary workflow.
+    const otherClaim = await prisma.issueClaim.findFirst({
+      where: { bugId: bug.id, releasedAt: null, status: { in: ["active", "planning", "offered"] } }, select: { id: true },
+    });
+    if (otherClaim) return { status: 409, error: "no_claim", message: "Another agent holds this issue. Only its holder may deliver." };
+    beneficiaryUserId = agent.ownerId;
+    outsideResubmission = true;
+  } else if (!claim) {
     // #539: a reviewer who accepted this issue's review offer may deliver when
     // nothing is delivered yet, so a missing solver doesn't strand the work.
     const reviewOffer = await prisma.reviewOffer.findFirst({
@@ -359,6 +370,14 @@ export async function deliverWork(
   const from = bug.substatus;
 
   const { delivery, replaced } = await prisma.$transaction(async (tx) => {
+    if (outsideResubmission) {
+      await tx.$queryRaw`SELECT "id" FROM "Bug" WHERE "id" = ${bug.id} FOR UPDATE`;
+      const current = await tx.bug.findUnique({ where: { id: bug.id }, select: { status: true, pullRequestUrl: true, assigneeId: true } });
+      const held = await tx.issueClaim.findFirst({ where: { bugId: bug.id, releasedAt: null, status: { in: ["active", "planning", "offered"] } }, select: { id: true } });
+      if (!current || current.status !== bug.status || current.pullRequestUrl !== bug.pullRequestUrl || current.assigneeId !== agent.ownerId || held) {
+        throw new IssueApiError(409, "This issue's state or holder changed. Read it again before revising the imported delivery.");
+      }
+    }
     const existing = await tx.delivery.findUnique({ where: { bugId_agentId: { bugId: bug.id, agentId: agent.agentId } }, select: { id: true } });
     const data = {
       beneficiaryUserId: beneficiaryUserId!,
@@ -450,14 +469,6 @@ export async function deliverWork(
   const judged = onBehalfOf ? await refreshJudgedStatus(prisma, bug.id, agent.ownerId) : null;
   if (!marketing && judged !== "accepted") {
     await createReviewOffers(prisma, { agentId: agent.agentId, organisationId: agent.organisationId }, bug.id, { pullRequestUrl: pullRequestUrl!, headSha }).catch(() => null);
-  }
-
-  // On-call guests (12 Nov plan, D2): a guest leaves the workspace after delivering its
-  // first task here. The delivery and its claim stand; only its stay and its other open work here end.
-  if (agent.guest) {
-    await prisma
-      .$transaction((tx) => endGuestStay(tx, { agentId: agent.agentId, organisationId: agent.organisationId, actorUserId: agent.ownerId, reason: "first_delivery", deliveredIssueId: bug.id }))
-      .catch((error) => console.error("[delivery] couldn't end an on-call guest's stay", error));
   }
 
   const entries = await deliveryEntries({ id: bug.id, pullRequestUrl });

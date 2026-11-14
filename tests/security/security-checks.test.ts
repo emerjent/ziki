@@ -39,6 +39,10 @@ import {
   SEVERITY_PRICE,
   agentsMayWork,
   freeScanAllowed,
+  isTargetProven,
+  ownershipProofRequired,
+  provenTargetWhere,
+  scanLimitsEnabled,
   freeScanMonthStart,
   isCheckPaid,
   isQuiet,
@@ -99,14 +103,34 @@ describe("security check words (#security-checks)", () => {
     expect(isSecurityCheckItemStatus("finished")).toBe(false);
   });
 
-  it("keep agents off a target until ownership is proven", () => {
+  it("keep agents off a target until ownership is proven, when proof is required", () => {
     const verified = { verifiedAt: new Date() };
-    expect(agentsMayWork({ status: "queued" }, { verifiedAt: null })).toBe(false);
-    expect(agentsMayWork({ status: "awaiting_ownership" }, verified)).toBe(false);
-    expect(agentsMayWork({ status: "queued" }, verified)).toBe(true);
-    expect(agentsMayWork({ status: "checking" }, verified)).toBe(true);
-    expect(agentsMayWork({ status: "done" }, verified)).toBe(false);
-    expect(agentsMayWork({ status: "cancelled" }, verified)).toBe(false);
+    expect(agentsMayWork({ status: "queued" }, { verifiedAt: null }, true)).toBe(false);
+    expect(agentsMayWork({ status: "awaiting_ownership" }, verified, true)).toBe(false);
+    expect(agentsMayWork({ status: "queued" }, verified, true)).toBe(true);
+    expect(agentsMayWork({ status: "checking" }, verified, true)).toBe(true);
+    expect(agentsMayWork({ status: "done" }, verified, true)).toBe(false);
+    expect(agentsMayWork({ status: "cancelled" }, verified, true)).toBe(false);
+  });
+
+  it("treats every target as proven while proof is off (the default), and only proven ones once it is on", () => {
+    const unproven = { verifiedAt: null };
+    expect(ownershipProofRequired()).toBe(false);
+    expect(isTargetProven(unproven)).toBe(true);
+    expect(agentsMayWork({ status: "queued" }, unproven)).toBe(true);
+    expect(agentsMayWork({ status: "done" }, unproven)).toBe(false);
+    expect(provenTargetWhere()).toEqual({});
+
+    expect(isTargetProven(unproven, true)).toBe(false);
+    expect(isTargetProven({ verifiedAt: new Date() }, true)).toBe(true);
+    expect(provenTargetWhere(true)).toEqual({ target: { verifiedAt: { not: null } } });
+  });
+
+  it("brings proof back with SECURITY_OWNERSHIP_PROOF_REQUIRED=true", () => {
+    vi.stubEnv("SECURITY_OWNERSHIP_PROOF_REQUIRED", "true");
+    expect(ownershipProofRequired()).toBe(true);
+    expect(isTargetProven({ verifiedAt: null })).toBe(false);
+    vi.unstubAllEnvs();
   });
 
   it("show results only once the collated report is posted", () => {
@@ -347,11 +371,21 @@ describe("the 12 Nov plan's rules (#security-checks, #on-call)", () => {
     expect(isResultUnlocked({ unlockedAt: new Date() })).toBe(true);
   });
 
-  it("allows one free scan per target and a few per workspace a month", () => {
-    expect(freeScanAllowed({ targetFreeScans: 0, workspaceFreeScansThisMonth: 0 })).toEqual({ allowed: true });
-    expect(freeScanAllowed({ targetFreeScans: FREE_SCANS_PER_TARGET, workspaceFreeScansThisMonth: 0 })).toEqual({ allowed: false, reason: "target_used" });
-    expect(freeScanAllowed({ targetFreeScans: 0, workspaceFreeScansThisMonth: FREE_SCANS_PER_WORKSPACE_PER_MONTH })).toEqual({ allowed: false, reason: "workspace_limit" });
+  it("allows one free scan per target and a few per workspace a month, when the limits are on", () => {
+    expect(freeScanAllowed({ targetFreeScans: 0, workspaceFreeScansThisMonth: 0 }, true)).toEqual({ allowed: true });
+    expect(freeScanAllowed({ targetFreeScans: FREE_SCANS_PER_TARGET, workspaceFreeScansThisMonth: 0 }, true)).toEqual({ allowed: false, reason: "target_used" });
+    expect(freeScanAllowed({ targetFreeScans: 0, workspaceFreeScansThisMonth: FREE_SCANS_PER_WORKSPACE_PER_MONTH }, true)).toEqual({ allowed: false, reason: "workspace_limit" });
     expect(freeScanMonthStart(new Date("2026-11-30T23:59:00Z"))).toEqual(new Date("2026-11-01T00:00:00Z"));
+  });
+
+  it("has no scan limit by default, and brings the limits back with SECURITY_SCAN_LIMITS_ENABLED=true", () => {
+    const spent = { targetFreeScans: FREE_SCANS_PER_TARGET, workspaceFreeScansThisMonth: FREE_SCANS_PER_WORKSPACE_PER_MONTH };
+    expect(scanLimitsEnabled()).toBe(false);
+    expect(freeScanAllowed(spent)).toEqual({ allowed: true });
+    vi.stubEnv("SECURITY_SCAN_LIMITS_ENABLED", "true");
+    expect(scanLimitsEnabled()).toBe(true);
+    expect(freeScanAllowed(spent)).toEqual({ allowed: false, reason: "target_used" });
+    vi.unstubAllEnvs();
   });
 
   it("flags an on-call agent as quiet after 15 minutes unseen, or when never seen", () => {

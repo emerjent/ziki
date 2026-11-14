@@ -216,20 +216,42 @@ describe("preview scan (#security-checks, 12 Nov plan D3)", () => {
     expect(bare.ok && bare.findings.find((f) => f.id === "missing-spf")?.detail).toContain("settle.ng has no SPF record");
   });
 
-  it("limits each visitor to a few previews an hour, and reuses a recent result without counting it", async () => {
+  it("with scan limits on, limits each visitor to a few previews an hour, and reuses a recent result without counting it", async () => {
     const net = network(WELL_KEPT);
     const sites = Array.from({ length: PREVIEW_SCANS_PER_VISITOR_PER_HOUR + 1 }, (_, i) => `site${i}.ng`);
     const results = [];
     for (const site of sites) {
-      results.push(await previewScan(site, { visitor: "same-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW }));
+      results.push(await previewScan(site, { visitor: "same-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW, limited: true }));
     }
     expect(results.slice(0, -1).every((r) => r.ok)).toBe(true);
     expect(results.at(-1)).toMatchObject({ ok: false, retryAfterSeconds: expect.any(Number) });
 
     // A link scanned a moment ago comes from the cache, even for a visitor at the limit.
-    const cached = await previewScan("site0.ng", { visitor: "same-ip", network: net, now: NOW + 60_000 });
+    const cached = await previewScan("site0.ng", { visitor: "same-ip", network: net, now: NOW + 60_000, limited: true });
     expect(cached).toMatchObject({ ok: true, target: "site0.ng" });
     expect(net.page).not.toHaveBeenCalled();
+  });
+
+  it("with scan limits off (14 Nov plan), never stops a visitor", async () => {
+    const sites = Array.from({ length: PREVIEW_SCANS_PER_VISITOR_PER_HOUR + 3 }, (_, i) => `open${i}.ng`);
+    for (const site of sites) {
+      const result = await previewScan(site, { visitor: "busy-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW, limited: false });
+      expect(result).toMatchObject({ ok: true, target: site });
+    }
+  });
+
+  it("reads the scan-limits setting: off unless SECURITY_SCAN_LIMITS_ENABLED is true", async () => {
+    const before = process.env.SECURITY_SCAN_LIMITS_ENABLED;
+    try {
+      delete process.env.SECURITY_SCAN_LIMITS_ENABLED;
+      for (let i = 0; i < PREVIEW_SCANS_PER_VISITOR_PER_HOUR + 1; i++) {
+        const site = `env${i}.ng`;
+        expect(await previewScan(site, { visitor: "env-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW })).toMatchObject({ ok: true });
+      }
+    } finally {
+      if (before === undefined) delete process.env.SECURITY_SCAN_LIMITS_ENABLED;
+      else process.env.SECURITY_SCAN_LIMITS_ENABLED = before;
+    }
   });
 
   it("doesn't hold an IP-reached server to a name on its certificate", () => {
@@ -334,18 +356,30 @@ describe("reading a public repo through Ziki's GitHub client (13 Nov)", () => {
 
   it("reads the names at the top level, in .github and in docs, and nothing else", async () => {
     github.getOrNull.mockImplementation(async (path: string) => ({
+      "/repos/settle/app": { private: false },
       "/repos/settle/app/contents": [{ name: "README.md", type: "file" }, { name: ".github", type: "dir" }, { name: "docs", type: "dir" }],
       "/repos/settle/app/contents/.github": [{ name: "dependabot.yml" }],
       "/repos/settle/app/contents/docs": [{ name: "SECURITY.md" }],
     })[path] ?? null);
     expect(await realPreviewNetwork.repo("settle", "app")).toEqual({ status: "ok", root: ["README.md", ".github", "docs"], github: ["dependabot.yml"], docs: ["SECURITY.md"] });
-    expect(github.getOrNull).toHaveBeenCalledTimes(3);
+    expect(github.getOrNull).toHaveBeenCalledTimes(4);
   });
 
   it("only looks inside .github and docs when the top level has them", async () => {
-    github.getOrNull.mockResolvedValue([{ name: "README.md" }]);
+    github.getOrNull.mockImplementation(async (path: string) => (path === "/repos/settle/app" ? { private: false } : [{ name: "README.md" }]));
     expect(await realPreviewNetwork.repo("settle", "app")).toEqual({ status: "ok", root: ["README.md"], github: [], docs: [] });
+    expect(github.getOrNull).toHaveBeenCalledTimes(2);
+  });
+
+  it("never looks into a repo GitHub says is private, even though Ziki's token could read it", async () => {
+    github.getOrNull.mockImplementation(async (path: string) => (path === "/repos/settle/secret" ? { private: true } : [{ name: ".env" }]));
+    expect(await realPreviewNetwork.repo("settle", "secret")).toEqual({ status: "not_found" });
     expect(github.getOrNull).toHaveBeenCalledTimes(1);
+    expect(github.getOrNull).toHaveBeenCalledWith("/repos/settle/secret");
+    // A record that doesn't plainly say public is treated the same way.
+    github.getOrNull.mockReset();
+    github.getOrNull.mockResolvedValue({});
+    expect(await realPreviewNetwork.repo("settle", "unclear")).toEqual({ status: "not_found" });
   });
 
   it("says not found for a private or missing repo", async () => {
@@ -365,7 +399,7 @@ describe("reading a public repo through Ziki's GitHub client (13 Nov)", () => {
     github.getOrNull.mockImplementation(async () => {
       throw new GitHubError(401, "Bad credentials");
     });
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ name: "README.md" }, { name: "SECURITY.md" }]), { status: 200 }));
+    const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/contents") ? [{ name: "README.md" }, { name: "SECURITY.md" }] : { private: false }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     expect(await realPreviewNetwork.repo("settle", "app")).toEqual({ status: "ok", root: ["README.md", "SECURITY.md"], github: [], docs: [] });
     expect(fetchMock).toHaveBeenCalledWith("https://api.github.test/repos/settle/app/contents", expect.not.objectContaining({ headers: expect.objectContaining({ Authorization: expect.anything() }) }));

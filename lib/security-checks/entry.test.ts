@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
 const prismaMock = vi.hoisted(() => ({
@@ -80,6 +80,14 @@ describe("addTargetAndCheck (#security-checks part 1)", () => {
 });
 
 describe("free-scan limits (plan C1)", () => {
+  // The limits are off by default (14 Nov plan); these tests are about the limits themselves.
+  beforeEach(() => {
+    vi.stubEnv("SECURITY_SCAN_LIMITS_ENABLED", "true");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("opens no check once the site has had its free scan, and says so", async () => {
     prismaMock.securityTarget.findUnique.mockResolvedValue({ id: "t1", verifiedAt: new Date() });
     prismaMock.securityCheck.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "c-old" });
