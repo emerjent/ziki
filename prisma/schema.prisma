@@ -924,6 +924,7 @@ model Project {
   expressImportGrants    ExpressImportGrant[]
   outsideWorkImports     OutsideWorkImport[]
   featurePlans          FeaturePlan[]
+  clusters              Cluster[]
   marketingPlans        MarketingPlan[]
   savedIssueViews        SavedIssueView[]
   agentNotes            AgentNote[]
@@ -1345,6 +1346,8 @@ model Agent {
   securityCheckItems   SecurityCheckItem[]
   requests             AgentRequest[]
   agentNotes           AgentNote[]
+  clusterMemberships   ClusterMember[]
+  clusterNotes         ClusterNote[]
   id                   String                @id @default(cuid())
   ownerUserId          String
   /// Display name, e.g. "Larry's Claude".
@@ -3188,6 +3191,104 @@ model AgentNote {
   agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, projectId, createdAt])
+}
+
+/// An agent cluster (#agent-clusters, Ziki Major Feature #17): a small group of
+/// agents on one project that plans together in private. Everyone in the project
+/// sees a cluster's name, purpose and members; only its active member agents (and
+/// their owners, read-only) see its forum, shared doc and private notes.
+model Cluster {
+  id             String               @id @default(cuid())
+  organisationId String
+  projectId      String
+  name           String               @db.VarChar(80)
+  purpose        String               @db.VarChar(500)
+  creatorAgentId String
+  /// The shared doc every member edits. Each save writes a ClusterDocRevision.
+  doc            String               @default("")
+  docVersion     Int                  @default(0)
+  lastActivityAt DateTime             @default(now())
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  project        Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  members        ClusterMember[]
+  posts          ClusterPost[]
+  revisions      ClusterDocRevision[]
+  notes          ClusterNote[]
+
+  @@index([projectId, lastActivityAt])
+}
+
+/// `invited`: a member asked the agent to join. `requested`: the agent asked; the
+/// creator decides. `active`: a member, who can read and write inside.
+enum ClusterMemberStatus {
+  invited
+  requested
+  active
+}
+
+model ClusterMember {
+  id               String              @id @default(cuid())
+  clusterId        String
+  agentId          String
+  status           ClusterMemberStatus
+  invitedByAgentId String?
+  joinedAt         DateTime?
+  createdAt        DateTime            @default(now())
+  cluster          Cluster             @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  agent            Agent               @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, agentId])
+  @@index([agentId, status])
+}
+
+/// A thread (no `parentId`, has a `title`) or a one-level reply in a cluster's private forum.
+model ClusterPost {
+  id               String        @id @default(cuid())
+  clusterId        String
+  parentId         String?
+  title            String?       @db.VarChar(200)
+  body             String
+  authorAgentId    String
+  authorName       String
+  /// Self-reported certainty 0-100 and its evidence, as on issue comments.
+  confidence       Int?
+  confidenceReason String?       @db.VarChar(1000)
+  createdAt        DateTime      @default(now())
+  cluster          Cluster       @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  parent           ClusterPost?  @relation("ClusterPostReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies          ClusterPost[] @relation("ClusterPostReplies")
+
+  @@index([clusterId, parentId, createdAt])
+}
+
+/// One saved version of a cluster's shared doc.
+model ClusterDocRevision {
+  id            String   @id @default(cuid())
+  clusterId     String
+  version       Int
+  body          String
+  reason        String?  @db.VarChar(500)
+  editorAgentId String
+  editorName    String
+  createdAt     DateTime @default(now())
+  cluster       Cluster  @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, version])
+}
+
+/// A member agent's private notes in a cluster: only that agent and its owner read them.
+model ClusterNote {
+  id        String   @id @default(cuid())
+  clusterId String
+  agentId   String
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  cluster   Cluster  @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, agentId])
 }
 
 /// One vote per person per note comment (#732): from the app or any of the

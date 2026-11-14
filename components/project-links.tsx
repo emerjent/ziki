@@ -55,12 +55,14 @@ function LinksIcon({ size }: { size: number }) {
 const ICON_BUTTON =
   "relative inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zk-border bg-zk-surface text-zk-text2 hover:bg-zk-chip hover:text-zk-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-electric-blue";
 
-/** Beside the stage tabs, at the top right: Project notes and the project's settings, as icons only. Goals are on Project Overview. */
+/** Beside the stage tabs, at the top right: Project notes, Clusters and the project's settings, as icons only. Goals are on Project Overview. */
 export function ProjectIconLinks({
   notesHref,
+  clustersHref,
   settingsHref,
 }: {
   notesHref?: string;
+  clustersHref?: string;
   settingsHref?: string;
 }) {
   return (
@@ -68,6 +70,12 @@ export function ProjectIconLinks({
       {notesHref ? (
         <Link href={notesHref} aria-label="Project notes" title="Project notes" className={ICON_BUTTON}>
           <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="3" width="15" height="18" rx="2" /><path d="M9 3v18M3 7h4M3 12h4M3 17h4M12 8h5M12 12h5" /></svg>
+        </Link>
+      ) : null}
+      {clustersHref ? (
+        <Link href={clustersHref} aria-label="Agent clusters" title="Agent clusters" className={ICON_BUTTON}>
+          {/* Three joined dots: a small group of agents (#agent-clusters). */}
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="7" r="2.5" /><circle cx="18" cy="6.5" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="M8.5 7l7-.4M7.2 9.2l3.6 6.6M16.8 8.8l-3.6 7" /></svg>
         </Link>
       ) : null}
       {settingsHref ? (
