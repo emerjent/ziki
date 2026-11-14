@@ -16,16 +16,16 @@ const REPO_STEPS = ["Secrets in files", "Security policy", "Dependency updates"]
 /** The empty place below the header where the scan and its result open. */
 export const SCAN_RESULT_SLOT = "security-scan-result";
 
-/** Where a signed-out visitor goes after signing up or in: their address comes along to Add asset. */
+/** Where a signed-out visitor goes after signing up or in: their address comes along to the Security page, where its scan starts. */
 export function addAssetPath(target: string): string {
-  return `/security/new?target=${encodeURIComponent(target)}`;
+  return `/security?target=${encodeURIComponent(target)}`;
 }
 
 /**
  * The box on the public Ziki Security page (#security-checks, part C2): one
  * field, no AI. Dave's quick scan looks at the site and the result shows the
  * counts only. Signed out, the next step is signing up (the address comes
- * along); signed in, it's Show it's yours, straight away.
+ * along to the Security page); signed in, it's added to their scans straight away.
  */
 export function PublicScan({ signedIn }: { signedIn: boolean }) {
   const router = useRouter();
@@ -66,7 +66,7 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
     setError(null);
     setSummary(null);
     setNote(null);
-    // A repo goes by its GitHub address: it is what the scan and Show it's yours read back.
+    // A repo goes by its GitHub address: it is what the scan reads back.
     const address = targetAddress(parsed.target);
     setSite(address);
     setStep(0);
@@ -82,7 +82,7 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
     });
   }
 
-  function showItsYours() {
+  function addToScans() {
     if (!site) return;
     startAdding(async () => {
       const answer = await addSecurityAsset(site);
@@ -95,16 +95,16 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
     signedIn ? (
       <div className="flex flex-wrap items-center gap-3 border-t border-zk-divider pt-3">
         <p className="m-0 min-w-[12rem] flex-1 text-[13px] leading-snug text-zk-muted">
-          Show {site} is yours to see every problem and have agents check it properly.
+          Add {site} to your scans and agents check it properly.
         </p>
-        <button type="button" onClick={showItsYours} disabled={adding} className="inline-flex h-10 shrink-0 items-center rounded-full bg-electric-blue-strong px-5 text-sm font-bold text-white hover:brightness-105 disabled:opacity-60">
-          {adding ? "Adding…" : "Show it’s yours"}
+        <button type="button" onClick={addToScans} disabled={adding} className="inline-flex h-10 shrink-0 items-center rounded-full bg-electric-blue-strong px-5 text-sm font-bold text-white hover:brightness-105 disabled:opacity-60">
+          {adding ? "Adding…" : "Add to your scans"}
         </button>
       </div>
     ) : (
       <div className="flex flex-col items-center gap-2 rounded-xl bg-zk-tint px-4 py-4 text-center">
         <p className="m-0 text-base font-bold text-zk-text">Sign up to see your report</p>
-        <p className="m-0 max-w-sm text-[13px] text-zk-text2">Show {site} is yours and every problem opens, with how to fix it.</p>
+        <p className="m-0 max-w-sm text-[13px] text-zk-text2">{site} comes with you to your Security page, where agents check it properly and you can unlock each fix.</p>
         <div className="mt-1 flex flex-wrap items-center justify-center gap-3">
           <Link href={`/signup?callbackUrl=${encodeURIComponent(addAssetPath(site))}`} className="inline-flex h-10 items-center rounded-full bg-electric-blue-strong px-6 text-sm font-bold text-white hover:brightness-105">
             Sign up
@@ -138,7 +138,7 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
       </form>
       {error ? <p id="security-check-error" role="alert" className="m-0 mt-3 text-sm font-semibold text-[#ffd7d7]">{error}</p> : null}
       <p className="m-0 mt-3 text-[13px] text-white/85">
-        A quick check only sees what a browser sees, so it can&apos;t promise your site is safe. For a full check, Ziki&apos;s agents look properly once you show it&apos;s yours.
+        A quick check only sees what a browser sees, so it can&apos;t promise your site is safe. For a full check, sign up and Ziki&apos;s agents look properly.
       </p>
 
       {slot
