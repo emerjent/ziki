@@ -78,7 +78,24 @@ export default async function SecurityPage(props: {
   const searchQuery = new URLSearchParams(Object.entries(search).filter(([, value]) => value));
   const user = await requireUser();
   const access = await currentOrganisationAccess(user.id, user.role);
-  if (!access.organisationId) {
+  // The page opens on the one box (#security-checks). The findings dashboard is
+  // one link away, and any old link that carries a findings filter still lands on it.
+  const showFindings = params.view === "findings" || FINDINGS_FILTERS.some((key) => params[key] !== undefined);
+  const brought = typeof params.target === "string" ? parseSecurityTarget(params.target) : null;
+  if (!showFindings && !access.admin) {
+    // Scans live in a workspace the person owns or runs. If the current one isn't theirs,
+    // open one that is (keeping the scanned site); with none, they're asked to create one below.
+    const own = await prisma.membership.findFirst({
+      where: { userId: user.id, role: { in: ["owner", "admin"] }, organisation: { archivedAt: null } },
+      orderBy: { createdAt: "asc" },
+      select: { organisationId: true },
+    });
+    if (own && own.organisationId !== access.organisationId) {
+      const back = brought?.ok ? `/security?target=${encodeURIComponent(brought.target.value)}` : "/security";
+      redirect(`/organisations/open?organisation=${encodeURIComponent(own.organisationId)}&next=${encodeURIComponent(back)}`);
+    }
+  }
+  if (!access.organisationId || (!showFindings && !access.admin)) {
     return (
       <div className="space-y-4">
         <OrgPageHeader heading="h1" title="Security" actions={
@@ -87,31 +104,24 @@ export default async function SecurityPage(props: {
             <SecuritySettingsLink />
           </div>
         }>Report and track security findings.</OrgPageHeader>
-        {typeof params.target === "string" && parseSecurityTarget(params.target).ok ? (
-          // From the public page with no workspace yet: scans live in a workspace, so make one first.
-          <ReadOnlyNote>
-            To scan {params.target.trim()}, first{" "}
-            <Link href="/organisations" className="font-semibold text-zk-accent hover:underline">create your workspace</Link>
-            . Then come back to Security and paste it in.
-          </ReadOnlyNote>
-        ) : (
-          <ReadOnlyNote>Join or create a workspace to report and track security findings.</ReadOnlyNote>
-        )}
-        <SecurityStageFilterBar findings={[]} selected={selectedStage} severity={selectedSeverity} />
+        {/* No workspace of their own: scans live in one, so make it first, then come straight back with the site. */}
+        <ReadOnlyNote>
+          {brought?.ok ? `To scan ${brought.target.value}, first ` : "To secure a website, server or repo, first "}
+          <Link
+            href={`/organisations?next=${encodeURIComponent(brought?.ok ? `/security?target=${encodeURIComponent(brought.target.value)}` : "/security")}`}
+            className="font-semibold text-zk-accent hover:underline"
+          >
+            create your workspace
+          </Link>
+          . You&apos;ll come straight back here{brought?.ok ? " and the scan starts" : ""}.
+        </ReadOnlyNote>
       </div>
     );
   }
   const organisationId = access.organisationId;
-  // The page opens on the one box (#security-checks). The findings dashboard is
-  // one link away, and any old link that carries a findings filter still lands on it.
-  const showFindings = params.view === "findings" || FINDINGS_FILTERS.some((key) => params[key] !== undefined);
   if (!showFindings) {
-    // Only owners and admins own the assets and add checks; everyone else just sees their own work.
-    if (!access.admin) redirect("/security/work");
     const [checks, jobs] = await Promise.all([listWorkspaceChecks(organisationId, user.id), countAgentJobs(user.id)]);
     const highlight = typeof params.check === "string" ? { checkId: params.check, unlocked: Number(params.unlocked) > 0 ? Number(params.unlocked) : 0 } : undefined;
-    // From the public page after sign-up: the address they scanned, checked again before use.
-    const brought = typeof params.target === "string" ? parseSecurityTarget(params.target) : null;
     // One page (14 Nov plan): the box, the scan under it, then the person's scans.
     return (
       <div className="flex w-full flex-col pb-10">

@@ -26,6 +26,7 @@ vi.mock("@/lib/organisation-access", () => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     securityCheck: { findMany: vi.fn().mockResolvedValue([]) },
+    membership: { findFirst: vi.fn().mockResolvedValue(null) },
     securityCheckItem: { count: vi.fn().mockResolvedValue(0) },
     agentActivation: {
       findMany: vi.fn().mockResolvedValue([
@@ -151,7 +152,7 @@ describe("SecurityPage (/security)", () => {
     expect(markup).not.toContain("Add asset");
   });
 
-  it("sends a member who is not an owner or admin to Your work instead of the assets", async () => {
+  it("asks a member who owns no workspace to create one, instead of sending them to Your work", async () => {
     vi.mocked(currentOrganisationAccess).mockResolvedValueOnce({
       organisationId: "org_123",
       organisationName: "Workspace",
@@ -160,7 +161,25 @@ describe("SecurityPage (/security)", () => {
       admin: false,
     });
 
-    await expect(SecurityPage({})).rejects.toMatchObject({ digest: expect.stringContaining("/security/work") });
+    const markup = renderToStaticMarkup(await SecurityPage({ searchParams: Promise.resolve({ target: "yourshop.com" }) }));
+    expect(markup).toContain("To scan yourshop.com, first ");
+    expect(markup).toContain(`href="/organisations?next=${encodeURIComponent("/security?target=yourshop.com")}"`);
+  });
+
+  it("opens the workspace a member owns elsewhere, keeping the scanned site", async () => {
+    vi.mocked(currentOrganisationAccess).mockResolvedValueOnce({
+      organisationId: "org_123",
+      organisationName: "Workspace",
+      organisationSlug: "workspace",
+      membershipRole: "member",
+      admin: false,
+    });
+    const { prisma } = await import("@/lib/prisma");
+    vi.mocked(prisma.membership.findFirst).mockResolvedValueOnce({ organisationId: "org_own" } as never);
+
+    await expect(SecurityPage({ searchParams: Promise.resolve({ target: "yourshop.com" }) })).rejects.toMatchObject({
+      digest: expect.stringContaining(`/organisations/open?organisation=org_own&next=${encodeURIComponent("/security?target=yourshop.com")}`),
+    });
   });
 
   it("renders the Security settings gear link with its accessible name", async () => {
