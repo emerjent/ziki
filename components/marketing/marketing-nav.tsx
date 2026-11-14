@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Badge } from "@/components/ui/badge";
 import { marketingPath, type ProjectRef } from "@/lib/project-paths";
 
 const focus = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-electric-blue";
@@ -16,6 +17,7 @@ export function MarketingNav({ slug }: { slug: ProjectRef }) {
   const tasks = marketingPath(slug, "tasks");
   const output = marketingPath(slug, "output-box");
   const settings = marketingPath(slug, "settings");
+  const video = marketingPath(slug, "video");
   const plans = marketingPath(slug, "plans");
   const newTask = marketingPath(slug, "tasks/new");
   const current = (href: string) => (pathname === href || pathname.startsWith(`${href}/`) ? "page" : undefined);
@@ -43,6 +45,16 @@ export function MarketingNav({ slug }: { slug: ProjectRef }) {
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
+        </Link>
+        <Link href={video} aria-current={current(video)} className={`${action} bg-zk-tint px-4 text-zk-accent hover:opacity-90 aria-[current=page]:ring-2 aria-[current=page]:ring-zk-accent`}>
+          <svg {...iconProps}>
+            <rect x="2" y="5" width="14" height="14" rx="3" />
+            <path d="m16 10 6-4v12l-6-4" />
+          </svg>
+          Create video
+          <Badge className="rounded-full bg-zk-accent text-[10px] font-extrabold uppercase tracking-wide text-zk-surface">
+            New
+          </Badge>
         </Link>
         {pathname === newTask ? null : (
           <Link href={newTask} className={`${action} bg-electric-blue-strong px-4 text-white hover:opacity-90`}>
