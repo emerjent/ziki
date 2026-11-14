@@ -80,6 +80,7 @@ import { mergeReviewEntries } from "@/lib/agent-api/merge";
 import { DeliveriesPanel, MergeReviewsPanel, TestVerdictsPanel, type DeliveryView, type MergeReviewView, type TestVerdictView } from "@/components/issue-review-entries";
 import { Badge } from "@/components/ui/badge";
 import { VoteButton } from "@/components/vote-button";
+import { FavoriteButton } from "@/components/favorite-button";
 import { SpeedButton } from "@/components/speed-button";
 import {
   InsufficientVotesAuditBanner,
@@ -164,6 +165,7 @@ import { lastReadyPreviewUrl, latestPreviewBuild } from "@/lib/previews/builds";
 import { PreviewCard, type PreviewCardProps } from "@/components/preview-card";
 import { githubStatusPowers } from "@/lib/github/status-access";
 import { voteDirection } from "@/lib/voting";
+import { isFavorited } from "@/lib/favorites";
 import {
   issueChipBaseClass,
   issueStatusChipClass,
@@ -509,7 +511,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
   // has it (its claims), then every bid it took (#issue-bids).
   const pastConfirmation = bug.substatus !== "requires_confirmation";
   // Bids come in from the start, while it awaits confirmation too.
-  const [hold, bidList, claimHistory, watchRow] = await Promise.all([
+  const [hold, bidList, claimHistory, watchRow, favoriteRow] = await Promise.all([
     pastConfirmation ? loadOptional<IssueHold | null>("holder", null, () => currentHold(bug.id)) : Promise.resolve(null as IssueHold | null),
     // While Open, an open bid whose bidder is at the project's capacity says so (#bidder-capacity).
     loadOptional<BidEntryView[]>("bids", [], async () => {
@@ -554,6 +556,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       where: { userId_bugId: { userId: user.id, bugId: bug.id } },
       select: { watching: true },
     })),
+    // #902: the star is a private bookmark, so its row says all there is to say.
+    loadOptional("issue favorite", false, () => isFavorited(prisma, user.id, bug.id)),
   ]);
   const isWatchingIssue = watchRow?.watching ?? (bug.reporterId === user.id || bug.assigneeId === user.id);
   const awardClaim: AwardStepView | null = claimHistory[0] ?? null;
@@ -1661,16 +1665,19 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           ) : null
         }
         voteButtonSlot={
-          <VoteButton
-            bugId={bug.id}
-            voteCount={bug.voteCount}
-            userVote={userVote}
-            likeCount={voterSummary.likes.count}
-            likeVoters={voterSummary.likes.voters}
-            size="md"
-            showAvatars={false}
-            readOnly={bug.isDeleted || !canContribute}
-          />
+          <>
+            <FavoriteButton bugId={bug.id} favorited={favoriteRow} readOnly={bug.isDeleted} />
+            <VoteButton
+              bugId={bug.id}
+              voteCount={bug.voteCount}
+              userVote={userVote}
+              likeCount={voterSummary.likes.count}
+              likeVoters={voterSummary.likes.voters}
+              size="md"
+              showAvatars={false}
+              readOnly={bug.isDeleted || !canContribute}
+            />
+          </>
         }
         actionsMenuSlot={
           canMarkDuplicate || canDeleteHere ? (
@@ -2034,6 +2041,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           </div>
 
           <div className="flex shrink-0 flex-wrap items-center gap-2 self-start print:hidden">
+            <FavoriteButton bugId={bug.id} favorited={favoriteRow} readOnly={bug.isDeleted} />
             <VoteButton
               bugId={bug.id}
               voteCount={bug.voteCount}
