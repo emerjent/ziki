@@ -10,19 +10,24 @@ describe("summarisePreview (#security-checks)", () => {
     checked: ["email", "https", "headers"] as ("email" | "https" | "headers")[],
     counts: { critical: 0, high: 1, medium: 2, low: 0 },
     findings: [
-      { id: "a", severity: "high" as const, area: "headers" as const, title: "HIDDEN-TITLE-1", detail: "HIDDEN-DETAIL-1" },
-      { id: "b", severity: "medium" as const, area: "headers" as const, title: "HIDDEN-TITLE-2", detail: "HIDDEN-DETAIL-2" },
-      { id: "c", severity: "medium" as const, area: "email" as const, title: "HIDDEN-TITLE-3", detail: "HIDDEN-DETAIL-3" },
+      { id: "a", severity: "high" as const, area: "headers" as const, title: "No HSTS header", detail: "HIDDEN-DETAIL-1" },
+      { id: "b", severity: "medium" as const, area: "headers" as const, title: "No Content Security Policy", detail: "HIDDEN-DETAIL-2" },
+      { id: "c", severity: "medium" as const, area: "email" as const, title: "No DMARC record", detail: "HIDDEN-DETAIL-3" },
     ],
   };
 
-  it("keeps counts and areas in a fixed order, and drops every title and detail", () => {
+  it("keeps counts and areas in a fixed order, lists each problem worst first by its title, and drops every detail", () => {
     const summary = summarisePreview(result);
     expect(summary).toMatchObject({ target: "settle.ng", total: 3, risk: "high" });
     expect(summary.areas).toEqual([
       { area: "https", label: "HTTPS", problems: 0 },
       { area: "headers", label: "Security headers", problems: 2 },
       { area: "email", label: "Email settings", problems: 1 },
+    ]);
+    expect(summary.rows).toEqual([
+      { severity: "high", area: "headers", price: 3, label: "Security headers", title: "No HSTS header" },
+      { severity: "medium", area: "headers", price: 2, label: "Security headers", title: "No Content Security Policy" },
+      { severity: "medium", area: "email", price: 2, label: "Email settings", title: "No DMARC record" },
     ]);
     expect(JSON.stringify(summary)).not.toMatch(/HIDDEN-/);
   });
@@ -36,8 +41,8 @@ describe("summarisePreview (#security-checks)", () => {
       checked: ["updates", "secrets", "policy"],
       counts: { critical: 0, high: 1, medium: 0, low: 1 },
       findings: [
-        { id: "a", severity: "high", area: "secrets", title: "HIDDEN-TITLE", detail: "HIDDEN-DETAIL" },
-        { id: "b", severity: "low", area: "policy", title: "HIDDEN-TITLE", detail: "HIDDEN-DETAIL" },
+        { id: "a", severity: "high", area: "secrets", title: "A file that usually holds secrets", detail: "HIDDEN-DETAIL" },
+        { id: "b", severity: "low", area: "policy", title: "No security policy", detail: "HIDDEN-DETAIL" },
       ],
     });
     expect(summary).toMatchObject({ kind: "repo", target: "settle/app", total: 2, risk: "high" });
@@ -58,10 +63,10 @@ describe("summarisePreview (#security-checks)", () => {
 
 describe("quick-scan findings as locked rows (14 Nov plan, D3)", () => {
   const findings = [
-    { id: "cookie-no-samesite", severity: "low" as const, area: "cookies" as const, title: "SECRET-TITLE-LOW", detail: "SECRET-DETAIL-LOW" },
-    { id: "missing-hsts", severity: "high" as const, area: "headers" as const, title: "SECRET-TITLE-HIGH", detail: "SECRET-DETAIL-HIGH" },
-    { id: "missing-dmarc", severity: "medium" as const, area: "email" as const, title: "SECRET-TITLE-MEDIUM", detail: "SECRET-DETAIL-MEDIUM" },
-    { id: "certificate-expired", severity: "critical" as const, area: "certificate" as const, title: "SECRET-TITLE-CRITICAL", detail: "SECRET-DETAIL-CRITICAL" },
+    { id: "cookie-no-samesite", severity: "low" as const, area: "cookies" as const, title: "Cookies don't say when other sites may send them", detail: "SECRET-DETAIL-LOW" },
+    { id: "missing-hsts", severity: "high" as const, area: "headers" as const, title: "Browsers aren't told to always use HTTPS", detail: "SECRET-DETAIL-HIGH" },
+    { id: "missing-dmarc", severity: "medium" as const, area: "email" as const, title: "Anyone can send email that claims to be from this domain", detail: "SECRET-DETAIL-MEDIUM" },
+    { id: "certificate-expired", severity: "critical" as const, area: "certificate" as const, title: "The HTTPS certificate has expired", detail: "SECRET-DETAIL-CRITICAL" },
   ];
 
   it("lists every finding worst first with its area and price (critical 5, high 3, medium 2, low 1)", () => {
@@ -73,7 +78,7 @@ describe("quick-scan findings as locked rows (14 Nov plan, D3)", () => {
     ]);
   });
 
-  it("puts the rows in the summary the page gets, labelled, with no title, detail or finding id", () => {
+  it("puts the rows in the summary the page gets, labelled with their short title, with no detail or finding id", () => {
     const summary = summarisePreview({
       ok: true,
       kind: "website",
@@ -84,10 +89,10 @@ describe("quick-scan findings as locked rows (14 Nov plan, D3)", () => {
       findings,
     });
     expect(summary.rows).toEqual([
-      { severity: "critical", area: "certificate", label: "Certificate", price: 5 },
-      { severity: "high", area: "headers", label: "Security headers", price: 3 },
-      { severity: "medium", area: "email", label: "Email settings", price: 2 },
-      { severity: "low", area: "cookies", label: "Cookies", price: 1 },
+      { severity: "critical", area: "certificate", label: "Certificate", price: 5, title: "The HTTPS certificate has expired" },
+      { severity: "high", area: "headers", label: "Security headers", price: 3, title: "Browsers aren't told to always use HTTPS" },
+      { severity: "medium", area: "email", label: "Email settings", price: 2, title: "Anyone can send email that claims to be from this domain" },
+      { severity: "low", area: "cookies", label: "Cookies", price: 1, title: "Cookies don't say when other sites may send them" },
     ]);
     const sent = JSON.stringify(summary);
     expect(sent).not.toMatch(/SECRET-/);

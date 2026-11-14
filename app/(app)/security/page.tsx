@@ -24,7 +24,8 @@ import {
 import { LocalTime } from "@/components/local-time";
 import { SecurityChecksPanel } from "@/components/security-checks/entry-panel";
 import { SecurityTabs } from "@/components/security-checks/security-tabs";
-import { listWorkspaceChecks, parseSiteFilter } from "@/lib/security-checks/entry";
+import { listWorkspaceChecks } from "@/lib/security-checks/entry";
+import { parseSecurityTarget } from "@/lib/security-checks/target";
 import { countAgentJobs } from "@/lib/security-checks/your-work";
 import { OrgPageHeader, ReadOnlyNote, orgCard, orgListCard } from "../[org]/[project]/org/org-ui";
 
@@ -52,6 +53,7 @@ type SearchParams = Promise<{
   added?: string | string[];
   view?: string | string[];
   show?: string | string[];
+  target?: string | string[];
 }>;
 
 const FINDINGS_PATH = "/security?view=findings";
@@ -85,7 +87,16 @@ export default async function SecurityPage(props: {
             <SecuritySettingsLink />
           </div>
         }>Report and track security findings.</OrgPageHeader>
-        <ReadOnlyNote>Join or create a workspace to report and track security findings.</ReadOnlyNote>
+        {typeof params.target === "string" && parseSecurityTarget(params.target).ok ? (
+          // From the public page with no workspace yet: scans live in a workspace, so make one first.
+          <ReadOnlyNote>
+            To scan {params.target.trim()}, first{" "}
+            <Link href="/organisations" className="font-semibold text-zk-accent hover:underline">create your workspace</Link>
+            . Then come back to Security and paste it in.
+          </ReadOnlyNote>
+        ) : (
+          <ReadOnlyNote>Join or create a workspace to report and track security findings.</ReadOnlyNote>
+        )}
         <SecurityStageFilterBar findings={[]} selected={selectedStage} severity={selectedSeverity} />
       </div>
     );
@@ -98,13 +109,15 @@ export default async function SecurityPage(props: {
     // Only owners and admins own the assets and add checks; everyone else just sees their own work.
     if (!access.admin) redirect("/security/work");
     const [checks, jobs] = await Promise.all([listWorkspaceChecks(organisationId, user.id), countAgentJobs(user.id)]);
-    const highlight = typeof params.check === "string" ? { checkId: params.check, unlocked: Number(params.unlocked) > 0 ? Number(params.unlocked) : 0, added: params.added === "1" } : undefined;
-    // Assets and Your work are always there. With nothing added yet, Assets holds the box and the three steps.
+    const highlight = typeof params.check === "string" ? { checkId: params.check, unlocked: Number(params.unlocked) > 0 ? Number(params.unlocked) : 0 } : undefined;
+    // From the public page after sign-up: the address they scanned, checked again before use.
+    const brought = typeof params.target === "string" ? parseSecurityTarget(params.target) : null;
+    // One page (14 Nov plan): the box, the scan under it, then the person's scans.
     return (
       <div className="flex w-full flex-col pb-10">
         <h1 className="sr-only">Security</h1>
         <SecurityTabs selected="checks" checks={checks.length} jobs={jobs} />
-        <SecurityChecksPanel checks={checks} highlight={highlight} show={parseSiteFilter(params.show)} />
+        <SecurityChecksPanel checks={checks} highlight={highlight} startWith={brought?.ok ? brought.target.value : undefined} />
       </div>
     );
   }

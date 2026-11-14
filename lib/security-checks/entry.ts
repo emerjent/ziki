@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Prisma, type SecurityCheckStatus, type SecurityTargetKind } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { PreviewSummary } from "./preview-summary";
-import { SECURITY_CHECK_PRICE_COINS, FINISHED_CHECK_STATUSES, FREE_SCANS_PER_WORKSPACE_PER_MONTH, freeScanAllowed, freeScanMonthStart } from "@/lib/security-checks";
+import { SECURITY_CHECK_PRICE_COINS, FINISHED_CHECK_STATUSES, FREE_SCANS_PER_WORKSPACE_PER_MONTH, freeScanAllowed, freeScanMonthStart, ownershipProofRequired } from "@/lib/security-checks";
 import type { ParsedTarget } from "@/lib/security-checks/target";
 
 /**
@@ -81,7 +81,8 @@ export async function addTargetAndCheck(
       free: true,
       priceCoins: SECURITY_CHECK_PRICE_COINS,
       // A target proven once never asks again: its new checks are ready for agents.
-      status: verified ? "queued" : "awaiting_ownership",
+      // No proof step while it's switched off (14 Nov plan): the check is queued at once.
+      status: verified || !ownershipProofRequired() ? "queued" : "awaiting_ownership",
     },
     select: { id: true },
   });
@@ -128,9 +129,10 @@ export async function saveQuickScan(targetId: string, summary: PreviewSummary, n
   await prisma.securityTarget.update({ where: { id: targetId }, data: { previewSummary: summary, previewAt: now } });
 }
 
-/** Where the client goes next for a new check: show it's theirs, or, if already proven, back to Assets where its free scan starts. */
+/** Where the client goes next for a new check: the Security page with it open, or, only while the proof step is switched on, show it's theirs. */
 export function nextStepPath(check: { targetId: string; checkId: string; verified: boolean }): string {
-  return check.verified ? `/security?check=${encodeURIComponent(check.checkId)}&added=1` : `/security/targets/${check.targetId}/verify`;
+  if (ownershipProofRequired() && !check.verified) return `/security/targets/${check.targetId}/verify`;
+  return `/security?check=${encodeURIComponent(check.checkId)}`;
 }
 
 export type WorkspaceCheckRow = {
@@ -145,10 +147,23 @@ export type WorkspaceCheckRow = {
   /** Findings reported, and how many of them the client has unlocked. */
   findings: number;
   unlocked: number;
+  /** Findings already moved to the client's app as issues. */
+  moved: number;
+  /** The quick scan from when it was added, if any: counts and locked rows only. */
+  preview: PreviewSummary | null;
   createdAt: Date;
 };
 
-/** Where a site is, for the Assets sidebar: waiting for proof, being checked, or its report is ready to fix. */
+/** A scan's place, on its card: being checked, its report ready, or findings moved to the app (14 Nov plan, C1). */
+export type ScanStage = "scanning" | "report" | "in_app" | "cancelled";
+
+export function scanStage(check: Pick<WorkspaceCheckRow, "status" | "posted" | "moved">): ScanStage {
+  if (check.status === "cancelled") return "cancelled";
+  if (check.moved > 0) return "in_app";
+  return check.posted ? "report" : "scanning";
+}
+
+/** Where a site was in the old steps (kept for when the proof step comes back). */
 export type SiteStage = "prove" | "checking" | "fix" | "cancelled";
 export const SITE_FILTERS = ["all", "prove", "checking", "fix"] as const;
 export type SiteFilter = (typeof SITE_FILTERS)[number];
@@ -175,8 +190,8 @@ export async function listWorkspaceChecks(organisationId: string, userId: string
       status: true,
       postedAt: true,
       createdAt: true,
-      target: { select: { id: true, kind: true, value: true, verifiedAt: true } },
-      results: { select: { unlockedAt: true } },
+      target: { select: { id: true, kind: true, value: true, verifiedAt: true, previewSummary: true } },
+      results: { select: { unlockedAt: true, findingId: true } },
     },
   });
   return rows.map((row) => ({
@@ -189,6 +204,8 @@ export async function listWorkspaceChecks(organisationId: string, userId: string
     posted: row.postedAt !== null,
     findings: row.results.length,
     unlocked: row.results.filter((result) => result.unlockedAt !== null).length,
+    moved: row.results.filter((result) => result.findingId !== null).length,
+    preview: readQuickScan(row.target.previewSummary),
     createdAt: row.createdAt,
   }));
 }

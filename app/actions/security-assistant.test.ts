@@ -37,8 +37,8 @@ const SCAN = {
   checked: ["https", "certificate", "headers", "cookies", "email"],
   counts: { critical: 0, high: 1, medium: 1, low: 0 },
   findings: [
-    { id: "hsts", severity: "high", area: "headers", title: "No HSTS header SECRET", detail: "Browsers may load it over HTTP SECRET" },
-    { id: "dmarc", severity: "medium", area: "email", title: "No DMARC record SECRET", detail: "Mail can be faked SECRET" },
+    { id: "hsts", severity: "high", area: "headers", title: "No HSTS header", detail: "Browsers may load it over HTTP SECRET" },
+    { id: "dmarc", severity: "medium", area: "email", title: "No DMARC record", detail: "Mail can be faked SECRET" },
   ],
 };
 
@@ -60,53 +60,54 @@ describe("talkToSecurityAssistant (#security-checks, plan C3)", () => {
     expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
   });
 
-  it("scans a plain link without the AI, shows only counts, and saves nothing yet", async () => {
+  it("scans a plain link without the AI, adds it to the person's scans at once, and saves the quick scan", async () => {
     const answer = await talkToSecurityAssistant(say("https://www.settle.ng"));
     expect(mocks.ask).not.toHaveBeenCalled();
     expect(mocks.preview).toHaveBeenCalledWith("settle.ng", { visitor: "user:u1" });
-    expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
-    expect(answer).toMatchObject({ kind: "scan", target: "settle.ng", summary: { total: 2, risk: "high" } });
-    // What was found never leaves the server before the site is proven.
+    // No proof step: added straight away (14 Nov plan).
+    expect(mocks.addTargetAndCheck).toHaveBeenCalledWith("org1", "u1", expect.objectContaining({ kind: "website", value: "settle.ng" }));
+    expect(mocks.saveQuickScan).toHaveBeenCalledWith("t1", expect.objectContaining({ total: 2, risk: "high" }));
+    expect(answer).toMatchObject({ kind: "scan", target: "settle.ng", checkId: "c1", summary: { total: 2, risk: "high" } });
+    // What any browser sees is shown as titles; the detail never leaves the server.
+    expect(JSON.stringify(answer)).toContain("No HSTS header");
     expect(JSON.stringify(answer)).not.toContain("SECRET");
+    expect(JSON.stringify(mocks.saveQuickScan.mock.calls[0][1])).not.toContain("SECRET");
   });
 
-  it("offers no Show it's yours for a site the scan couldn't reach, but does when only the limit was hit", async () => {
+  it("adds nothing for a site the scan couldn't reach, but still adds it when only the limit was hit", async () => {
     mocks.preview.mockResolvedValue({ ok: false, reason: "We couldn't reach settle.ng just now." });
-    expect(await talkToSecurityAssistant(say("settle.ng"))).toMatchObject({ kind: "scan", summary: null, note: "We couldn't reach settle.ng just now.", canAdd: false });
+    expect(await talkToSecurityAssistant(say("settle.ng"))).toMatchObject({ kind: "scan", reply: "", summary: null, note: "We couldn't reach settle.ng just now.", checkId: null });
+    expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
 
     mocks.preview.mockResolvedValue({ ok: false, reason: "Too many scans.", retryAfterSeconds: 120 });
-    expect(await talkToSecurityAssistant(say("settle.ng"))).toMatchObject({ kind: "scan", summary: null, canAdd: true });
+    expect(await talkToSecurityAssistant(say("settle.ng"))).toMatchObject({ kind: "scan", summary: null, checkId: "c1" });
   });
 
-  it("quick-scans a GitHub repo like any other asset, and saves nothing until Show it's yours", async () => {
+  it("quick-scans a GitHub repo like any other asset and adds it", async () => {
     mocks.preview.mockResolvedValue({ ...SCAN, kind: "repo", target: "settle/app", checked: ["secrets", "policy"], counts: { critical: 0, high: 1, medium: 0, low: 1 }, findings: [
-      { id: "s", severity: "high", area: "secrets", title: "A file that usually holds secrets SECRET", detail: ".env SECRET" },
-      { id: "p", severity: "low", area: "policy", title: "No security policy SECRET", detail: "No SECURITY.md SECRET" },
+      { id: "s", severity: "high", area: "secrets", title: "A file that usually holds secrets", detail: ".env SECRET" },
+      { id: "p", severity: "low", area: "policy", title: "No security policy", detail: "No SECURITY.md SECRET" },
     ] });
     const answer = await talkToSecurityAssistant(say("github.com/settle/app"));
     // The scan reads its link back through the same parser, so a repo must go in as a GitHub address, not "owner/name".
     expect(mocks.preview).toHaveBeenCalledWith("github.com/settle/app", { visitor: "user:u1" });
-    expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
-    // The card's target is what Show it's yours sends back to be added, so it has to be an address the parser accepts.
+    expect(mocks.addTargetAndCheck).toHaveBeenCalledTimes(1);
     expect(answer).toMatchObject({ kind: "scan", target: "github.com/settle/app", summary: { kind: "repo", total: 2, risk: "high" } });
     expect(JSON.stringify(answer)).not.toContain("SECRET");
   });
 
-  it("still offers Show it's yours for a repo it can't see, such as a private one", async () => {
+  it("still adds a repo it can't see, such as a private one", async () => {
     mocks.preview.mockResolvedValue({ ok: false, reason: "We couldn't see that repo on GitHub." });
     const answer = await talkToSecurityAssistant(say("github.com/settle/private-app"));
-    expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
-    expect(answer).toMatchObject({ kind: "scan", summary: null, note: "We couldn't see that repo on GitHub.", canAdd: true });
+    expect(mocks.addTargetAndCheck).toHaveBeenCalledTimes(1);
+    expect(mocks.saveQuickScan).not.toHaveBeenCalled();
+    expect(answer).toMatchObject({ kind: "scan", summary: null, note: "We couldn't see that repo on GitHub.", checkId: "c1" });
   });
 
-  it("adds the asset only on Show it's yours, saves the quick scan's counts with it, then goes on to prove it", async () => {
-    expect(await addSecurityAsset("settle.ng")).toMatchObject({ kind: "go", href: "/security/targets/t1/verify" });
+  it("from the public page, signed in: scans, adds and goes to the Security page with the check open", async () => {
+    expect(await addSecurityAsset("settle.ng")).toMatchObject({ kind: "go", href: "/security?check=c1" });
     expect(mocks.addTargetAndCheck).toHaveBeenCalledWith("org1", "u1", expect.objectContaining({ kind: "website", value: "settle.ng" }));
     expect(mocks.saveQuickScan).toHaveBeenCalledWith("t1", expect.objectContaining({ total: 2, risk: "high" }));
-    expect(JSON.stringify(mocks.saveQuickScan.mock.calls[0][1])).not.toContain("SECRET");
-
-    mocks.addTargetAndCheck.mockResolvedValue({ targetId: "t1", checkId: "c9", verified: true, reused: false });
-    expect(await addSecurityAsset("settle.ng")).toMatchObject({ kind: "go", href: "/security?check=c9&added=1" });
     expect(await addSecurityAsset("not a link")).toMatchObject({ kind: "error" });
   });
 
@@ -124,8 +125,8 @@ describe("talkToSecurityAssistant (#security-checks, plan C3)", () => {
 
     mocks.ask.mockResolvedValue({ reply: "Here's a quick look.", target: "settle.ng" });
     const answer = await talkToSecurityAssistant(say("It's settle dot ng, the website"));
-    expect(answer).toMatchObject({ kind: "scan", reply: "Here's a quick look.", target: "settle.ng" });
-    expect(mocks.addTargetAndCheck).not.toHaveBeenCalled();
+    expect(answer).toMatchObject({ kind: "scan", reply: "Here's a quick look.", target: "settle.ng", checkId: "c1" });
+    expect(mocks.addTargetAndCheck).toHaveBeenCalledTimes(1);
   });
 
   it("never adds a private address the AI picks out", async () => {

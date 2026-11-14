@@ -8,7 +8,7 @@ const prismaMock = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
 
-import { addTargetAndCheck, listWorkspaceChecks, newOwnershipToken, nextStepPath, parseSiteFilter, refusedMessage, siteStage } from "./entry";
+import { addTargetAndCheck, listWorkspaceChecks, newOwnershipToken, nextStepPath, parseSiteFilter, refusedMessage, scanStage, siteStage } from "./entry";
 import { findingPrice, unlockFindings } from "./payment";
 
 const site = { kind: "website" as const, value: "settle.ng", input: "https://settle.ng" };
@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 
 describe("addTargetAndCheck (#security-checks part 1)", () => {
-  it("stores a new target with a fresh token and opens a check waiting for ownership", async () => {
+  it("stores a new target with a fresh token and queues its check at once, with the proof step off", async () => {
     prismaMock.securityTarget.findUnique.mockResolvedValue(null);
     prismaMock.securityTarget.create.mockResolvedValue({ id: "t1", verifiedAt: null });
     prismaMock.securityCheck.findFirst.mockResolvedValue(null);
@@ -33,8 +33,21 @@ describe("addTargetAndCheck (#security-checks part 1)", () => {
     expect(created).toMatchObject({ organisationId: "org1", kind: "website", value: "settle.ng", input: "https://settle.ng", addedById: "u1" });
     expect(created.ownershipToken).toMatch(/^ziki-verify-[0-9a-f]{32}$/);
     expect(prismaMock.securityCheck.create.mock.calls[0][0].data).toEqual({
-      organisationId: "org1", targetId: "t1", requestedById: "u1", free: true, priceCoins: 50, status: "awaiting_ownership",
+      organisationId: "org1", targetId: "t1", requestedById: "u1", free: true, priceCoins: 50, status: "queued",
     });
+  });
+
+  it("waits for ownership only while the proof step is switched on", async () => {
+    vi.stubEnv("SECURITY_OWNERSHIP_PROOF_REQUIRED", "true");
+    prismaMock.securityTarget.findUnique.mockResolvedValue(null);
+    prismaMock.securityTarget.create.mockResolvedValue({ id: "t1", verifiedAt: null });
+    prismaMock.securityCheck.findFirst.mockResolvedValue(null);
+    prismaMock.securityCheck.create.mockResolvedValue({ id: "c1" });
+
+    await addTargetAndCheck("org1", "u1", site);
+
+    expect(prismaMock.securityCheck.create.mock.calls[0][0].data.status).toBe("awaiting_ownership");
+    vi.unstubAllEnvs();
   });
 
   it("reuses the workspace's target, and a proven target skips straight to queued", async () => {
@@ -117,9 +130,15 @@ describe("free-scan limits (plan C1)", () => {
 });
 
 describe("nextStepPath", () => {
-  it("sends an unproven target to show it's yours, and a proven one back to Your sites", () => {
+  it("goes back to the Security page for every new check while the proof step is off", () => {
+    expect(nextStepPath({ targetId: "t1", checkId: "c1", verified: false })).toBe("/security?check=c1");
+    expect(nextStepPath({ targetId: "t1", checkId: "c1", verified: true })).toBe("/security?check=c1");
+  });
+
+  it("sends an unproven target to show it's yours only while the proof step is on", () => {
+    vi.stubEnv("SECURITY_OWNERSHIP_PROOF_REQUIRED", "true");
     expect(nextStepPath({ targetId: "t1", checkId: "c1", verified: false })).toBe("/security/targets/t1/verify");
-    expect(nextStepPath({ targetId: "t1", checkId: "c1", verified: true })).toBe("/security?check=c1&added=1");
+    vi.unstubAllEnvs();
   });
 });
 
@@ -127,8 +146,8 @@ describe("listWorkspaceChecks", () => {
   it("lists only the checks this person asked for, newest first, with how many findings are unlocked", async () => {
     const createdAt = new Date("2026-11-11T10:00:00Z");
     prismaMock.securityCheck.findMany.mockResolvedValue([
-      { id: "c1", status: "awaiting_ownership", postedAt: null, createdAt, target: { id: "t1", kind: "website", value: "settle.ng", verifiedAt: null }, results: [] },
-      { id: "c2", status: "done", postedAt: createdAt, createdAt, target: { id: "t2", kind: "repo", value: "settle/app", verifiedAt: createdAt }, results: [{ unlockedAt: createdAt }, { unlockedAt: null }] },
+      { id: "c1", status: "queued", postedAt: null, createdAt, target: { id: "t1", kind: "website", value: "settle.ng", verifiedAt: null, previewSummary: null }, results: [] },
+      { id: "c2", status: "done", postedAt: createdAt, createdAt, target: { id: "t2", kind: "repo", value: "settle/app", verifiedAt: createdAt, previewSummary: null }, results: [{ unlockedAt: createdAt, findingId: "i1" }, { unlockedAt: null, findingId: null }] },
     ]);
 
     const rows = await listWorkspaceChecks("org1", "u1");
@@ -137,11 +156,12 @@ describe("listWorkspaceChecks", () => {
     expect(query.where).toEqual({ organisationId: "org1", requestedById: "u1" });
     expect(query.orderBy).toEqual({ createdAt: "desc" });
     // Only whether each finding is unlocked: never its text.
-    expect(query.select.results).toEqual({ select: { unlockedAt: true } });
-    expect(rows.map((r) => [r.id, r.verified, r.posted, r.findings, r.unlocked])).toEqual([
-      ["c1", false, false, 0, 0],
-      ["c2", true, true, 2, 1],
+    expect(query.select.results).toEqual({ select: { unlockedAt: true, findingId: true } });
+    expect(rows.map((r) => [r.id, r.verified, r.posted, r.findings, r.unlocked, r.moved, r.preview])).toEqual([
+      ["c1", false, false, 0, 0, 0, null],
+      ["c2", true, true, 2, 1, 1, null],
     ]);
+    expect(rows.map(scanStage)).toEqual(["scanning", "in_app"]);
   });
 });
 

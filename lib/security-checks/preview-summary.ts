@@ -5,9 +5,10 @@ import type { PreviewArea, PreviewFinding, PreviewResult } from "./preview";
 /**
  * What a quick scan may show while its findings are locked (#security-checks,
  * 14 Nov plan): the areas looked at, how many problems each has, the counts by
- * severity, an overall risk, and each finding as a locked row. Never a
- * finding's title or detail: those stay on the server until it is unlocked, so
- * they can't be read from the page's HTML or network traffic.
+ * severity, an overall risk, and each finding as a row with its short title
+ * (what any browser can already see, so it's shown: product call on 14 Nov).
+ * Never a finding's detail: that stays on the server until it is unlocked, so
+ * it can't be read from the page's HTML or network traffic.
  */
 
 export type PreviewRisk = "minimal" | "low" | "medium" | "high" | "critical";
@@ -46,7 +47,7 @@ export type PreviewSummary = {
    * Each finding as a locked row, worst first: severity, area and price only.
    * Absent on quick scans saved before 14 Nov, so read it as `rows ?? []`.
    */
-  rows?: (PreviewRow & { label: string })[];
+  rows?: (PreviewRow & { label: string; title?: string })[];
 };
 
 /**
@@ -73,7 +74,7 @@ export function previewRisk(counts: Record<SecuritySeverity, number>): PreviewRi
   return "minimal";
 }
 
-/** The shown part of a quick scan: counts and locked rows, never what was found. */
+/** The shown part of a quick scan: counts, and each finding's row with its short title; never its detail. */
 export function summarisePreview(result: Extract<PreviewResult, { ok: true }>): PreviewSummary {
   const problemsIn = (area: PreviewArea) => result.findings.filter((finding) => finding.area === area).length;
   const looked = new Set(result.checked);
@@ -85,6 +86,8 @@ export function summarisePreview(result: Extract<PreviewResult, { ok: true }>): 
     counts: { ...result.counts },
     risk: previewRisk(result.counts),
     areas: PREVIEW_AREA_ORDER.filter((area) => looked.has(area)).map((area) => ({ area, label: PREVIEW_AREA_LABEL[area], problems: problemsIn(area) })),
-    rows: previewRows(result.findings).map((row) => ({ ...row, label: PREVIEW_AREA_LABEL[row.area] })),
+    rows: [...result.findings]
+      .sort((a, b) => WORST_FIRST[a.severity] - WORST_FIRST[b.severity])
+      .map((finding) => ({ ...previewRows([finding])[0], label: PREVIEW_AREA_LABEL[finding.area], title: finding.title })),
   };
 }
