@@ -22,8 +22,8 @@ describe("Ziki Security's public page (#security-checks, C2)", () => {
     expect(isReservedProjectSlug("security-check")).toBe(true);
   });
 
-  it("brings the scanned address through sign-up to Add asset", () => {
-    expect(addAssetPath("yourshop.com")).toBe("/security/new?target=yourshop.com");
-    expect(addAssetPath("api.shop.ng:8443")).toBe("/security/new?target=api.shop.ng%3A8443");
+  it("brings the scanned address through sign-up to the Security page, where its scan starts", () => {
+    expect(addAssetPath("yourshop.com")).toBe("/security?target=yourshop.com");
+    expect(addAssetPath("api.shop.ng:8443")).toBe("/security?target=api.shop.ng%3A8443");
   });
 });
