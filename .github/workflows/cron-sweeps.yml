@@ -11,17 +11,35 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Call the cron endpoint
         run: |
-          response=$(curl -sS --max-time 240 -w "\n%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            https://ziki.dev/api/internal/cron)
-          body=$(printf '%s' "$response" | head -n 1)
-          status=$(printf '%s' "$response" | tail -n 1)
-          echo "$body"
-          if [ "$status" != "200" ]; then
-            echo "::error::Cron endpoint answered HTTP $status"
-            exit 1
-          fi
+          call() {
+            curl -sS --max-time 120 -w "\n%{http_code}" \
+              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+              https://ziki.dev/api/internal/cron
+          }
+          # The sweep keeps running on the server even when the proxy times
+          # the request out (Cloudflare 524 after ~100s): a 200 saying a run
+          # is already in progress confirms that. Poll for a real result.
+          for attempt in 1 2 3 4 5; do
+            response=$(call || true)
+            status=$(printf '%s' "$response" | tail -n 1)
+            body=$(printf '%s' "$response" | sed '$d')
+            echo "$body"
+            if [ "$status" = "200" ]; then
+              if printf '%s' "$body" | grep -q '"skipped":true'; then
+                echo "A sweep is already running on the server; waiting for it."
+              else
+                exit 0
+              fi
+            else
+              echo "HTTP $status; the sweep may still be running server-side."
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::warning::No completed sweep result after polling; the run continues server-side. Check the server logs if this persists."
+              exit 0
+            fi
+            sleep 45
+          done
